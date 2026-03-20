@@ -1,0 +1,31 @@
+# Credentials — NEVER commit
+.env.txt
+.streamlit/secrets.toml
+
+# Output data (regenerated on each run)
+output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Raw API test files
+*.json
+!.claude/launch.json
+
+# Overrides file (may contain business-sensitive data)
+campaign_overrides.csv
