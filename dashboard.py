@@ -42,7 +42,247 @@ from src.reports import (
 )
 
 
+# ─── Design System ──────────────────────────────────────────────────────────
+
+# Color tokens
+CLR_BG_PAGE = "#f8f9fb"
+CLR_SURFACE = "#ffffff"
+CLR_BORDER = "#e2e5ea"
+CLR_ACCENT = "#722f37"          # Burgundy — brand accent
+CLR_WEEKLY = "#2c3e50"          # Wine navy — Weekly charts
+CLR_MONTHLY = "#b8860b"         # Muted gold — Monthly charts
+CLR_MONTHLY_LINE = "#722f37"    # Burgundy — Monthly combo line
+CLR_PRODUCER = "#6b4c6e"        # Slate plum — Producer charts
+CLR_TEAL = "#3d7a80"            # Teal — scatter secondary
+CLR_TEXT_PRIMARY = "#1a1d23"
+CLR_TEXT_SECONDARY = "#5a6170"
+CLR_TEXT_MUTED = "#8c919a"
+CLR_POSITIVE = "#2d7d5f"
+CLR_NEGATIVE = "#c0392b"
+
+# Multi-series palette
+PALETTE_MULTI = [CLR_WEEKLY, CLR_TEAL, CLR_PRODUCER, CLR_MONTHLY, "#8fa3bf"]
+
+GLOBAL_CSS = f"""
+<style>
+    /* ── Page background ── */
+    .stApp {{
+        background-color: {CLR_BG_PAGE};
+    }}
+
+    /* ── Content container ── */
+    .block-container {{
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 1200px;
+    }}
+
+    /* ── Typography ── */
+    h1 {{
+        font-size: 1.75rem !important;
+        font-weight: 700 !important;
+        color: {CLR_TEXT_PRIMARY} !important;
+        letter-spacing: -0.02em;
+    }}
+    h2 {{
+        font-size: 1.25rem !important;
+        font-weight: 600 !important;
+        color: {CLR_TEXT_PRIMARY} !important;
+    }}
+    h3 {{
+        font-size: 1.05rem !important;
+        font-weight: 600 !important;
+        color: {CLR_TEXT_PRIMARY} !important;
+    }}
+
+    /* ── KPI Card ── */
+    .kpi-card {{
+        background: {CLR_SURFACE};
+        border: 1px solid {CLR_BORDER};
+        border-radius: 8px;
+        padding: 1.25rem 1.5rem;
+        text-align: left;
+    }}
+    .kpi-card .kpi-label {{
+        font-size: 0.75rem;
+        font-weight: 500;
+        color: {CLR_TEXT_MUTED};
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 0.25rem;
+    }}
+    .kpi-card .kpi-value {{
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: {CLR_TEXT_PRIMARY};
+        line-height: 1.2;
+        white-space: nowrap;
+    }}
+    .kpi-card .kpi-sub {{
+        font-size: 0.8rem;
+        color: {CLR_TEXT_SECONDARY};
+        margin-top: 0.25rem;
+    }}
+
+    /* ── Insight Card — all bordered containers get the accent ── */
+    [data-testid="stVerticalBlockBorderWrapper"] {{
+        border-left: 4px solid {CLR_ACCENT} !important;
+        border-radius: 4px !important;
+    }}
+    [data-testid="stVerticalBlockBorderWrapper"] h4 {{
+        font-size: 0.95rem !important;
+        font-weight: 600 !important;
+        color: {CLR_TEXT_PRIMARY} !important;
+        margin-bottom: 0.75rem !important;
+    }}
+    [data-testid="stVerticalBlockBorderWrapper"] p,
+    [data-testid="stVerticalBlockBorderWrapper"] li {{
+        font-size: 0.875rem;
+        color: {CLR_TEXT_SECONDARY};
+        line-height: 1.6;
+    }}
+    [data-testid="stVerticalBlockBorderWrapper"] strong {{
+        color: {CLR_TEXT_PRIMARY};
+    }}
+
+    /* ── Section title ── */
+    .section-title {{
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: {CLR_TEXT_PRIMARY};
+        margin-bottom: 0.75rem;
+        margin-top: 1.5rem;
+    }}
+
+    /* ── Page header ── */
+    .page-header {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding-bottom: 1.25rem;
+        border-bottom: 1px solid {CLR_BORDER};
+        margin-bottom: 1.25rem;
+    }}
+    .page-header .page-title {{
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: {CLR_TEXT_PRIMARY};
+    }}
+    .page-header .page-subtitle {{
+        font-size: 0.8rem;
+        color: {CLR_TEXT_MUTED};
+        margin-top: 0.25rem;
+    }}
+
+    /* ── Tab styling ── */
+    .stTabs [data-baseweb="tab-list"] {{
+        gap: 0;
+        border-bottom: 1px solid {CLR_BORDER};
+    }}
+    .stTabs [data-baseweb="tab"] {{
+        font-size: 0.875rem;
+        font-weight: 500;
+        color: {CLR_TEXT_SECONDARY};
+        padding: 0.75rem 1.5rem;
+        border-bottom: 2px solid transparent;
+    }}
+    .stTabs [aria-selected="true"] {{
+        color: {CLR_ACCENT} !important;
+        border-bottom-color: {CLR_ACCENT} !important;
+        font-weight: 600;
+    }}
+
+    /* ── Sidebar ── */
+    [data-testid="stSidebar"] {{
+        background-color: {CLR_SURFACE};
+        border-right: 1px solid {CLR_BORDER};
+    }}
+
+    /* ── Hide Streamlit footer ── */
+    footer {{visibility: hidden;}}
+
+    /* ── Spacing utility ── */
+    .spacer-lg {{ margin-top: 2rem; }}
+    .spacer-md {{ margin-top: 1.25rem; }}
+    .spacer-sm {{ margin-top: 0.75rem; }}
+
+    /* ── Context line ── */
+    .context-line {{
+        font-size: 0.8rem;
+        color: {CLR_TEXT_MUTED};
+        margin-bottom: 1rem;
+    }}
+
+    /* ── QA status badges ── */
+    .qa-ok {{
+        color: {CLR_POSITIVE};
+        font-weight: 600;
+    }}
+    .qa-warn {{
+        color: {CLR_NEGATIVE};
+        font-weight: 600;
+    }}
+</style>
+"""
+
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def render_kpi_row(kpis: list[dict]):
+    """Render a row of styled KPI cards. Each dict: {label, value, sub (optional)}."""
+    cols = st.columns(len(kpis))
+    for col, kpi in zip(cols, kpis):
+        sub_html = f'<div class="kpi-sub">{kpi.get("sub", "")}</div>' if kpi.get("sub") else ""
+        col.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-label">{kpi['label']}</div>
+            <div class="kpi-value">{kpi['value']}</div>
+            {sub_html}
+        </div>
+        """, unsafe_allow_html=True)
+
+
+def section_title(title: str, subtitle: str = ""):
+    """Render a section title with optional subtitle."""
+    sub = f'<div style="font-size:0.8rem; color:{CLR_TEXT_MUTED}; margin-top:-0.5rem; margin-bottom:0.75rem;">{subtitle}</div>' if subtitle else ""
+    st.markdown(f'<div class="section-title">{title}</div>{sub}', unsafe_allow_html=True)
+
+
+def styled_chart(chart: alt.Chart) -> alt.Chart:
+    """Apply consistent styling to all Altair charts."""
+    return chart.configure_view(
+        strokeWidth=0,
+    ).configure_axis(
+        labelFontSize=11,
+        labelColor=CLR_TEXT_SECONDARY,
+        titleFontSize=12,
+        titleColor=CLR_TEXT_PRIMARY,
+        titleFontWeight="normal",
+        gridColor=CLR_BORDER,
+        gridOpacity=0.5,
+        domainColor=CLR_BORDER,
+        tickColor=CLR_BORDER,
+    ).configure_legend(
+        labelFontSize=11,
+        labelColor=CLR_TEXT_SECONDARY,
+        titleFontSize=12,
+        titleColor=CLR_TEXT_PRIMARY,
+        titleFontWeight="normal",
+    )
+
+
+def render_insight_card(insights_md: str):
+    """Render insight markdown inside a styled card container.
+    Uses st.container(border=True) — CSS overrides give it the burgundy left accent.
+    """
+    with st.container(border=True):
+        st.markdown(insights_md)
+
+
+def spacer(size: str = "md"):
+    """Add vertical spacing. size: sm, md, lg."""
+    st.markdown(f'<div class="spacer-{size}"></div>', unsafe_allow_html=True)
+
 
 def _get_completed_week_range(run_date: date) -> tuple[date, date]:
     """
@@ -53,10 +293,8 @@ def _get_completed_week_range(run_date: date) -> tuple[date, date]:
     We show a full Mon-Sun week that falls within the completed range.
     """
     latest_completed = run_date - timedelta(days=8)
-    # Find the Monday of that week
     week_end = latest_completed
     week_start = week_end - timedelta(days=week_end.weekday())  # Monday
-    # Ensure the week_end is the Sunday of that week
     week_end = week_start + timedelta(days=6)
     return week_start, week_end
 
@@ -99,7 +337,7 @@ def _generate_analytical_insights(cdf: pd.DataFrame, week_start: date, week_end:
         return "_No coded campaigns with attribution data in this completed week._"
 
     # ── CAMPAIGN ANALYSIS ─────────────────────────────────────────────────
-    lines.append("### Campaign Performance Analysis")
+    lines.append("#### Campaign Performance Analysis")
     lines.append(f"**Completed week: {week_start} to {week_end}**\n")
 
     # Best/worst by efficiency
@@ -192,7 +430,7 @@ def _generate_analytical_insights(cdf: pd.DataFrame, week_start: date, week_end:
 
     # ── PRODUCER ANALYSIS ─────────────────────────────────────────────────
     lines.append("")
-    lines.append("### Producer Performance Analysis")
+    lines.append("#### Producer Performance Analysis")
 
     prod_group = coded.groupby("Producer / Topic").agg(
         Revenue=("Attributed Revenue", "sum"),
@@ -246,8 +484,6 @@ def _generate_monthly_insights(mdf: pd.DataFrame, all_month_df: pd.DataFrame) ->
     total_rev = mdf["Total_Attributed_Revenue"].sum()
     top = mdf.head(3)
 
-    lines.append("### Monthly Insights")
-
     # Top contributors
     lines.append("**Top discount code contributors:**")
     for _, r in top.iterrows():
@@ -295,7 +531,7 @@ def _generate_producer_insights(display_df: pd.DataFrame, view_label: str) -> st
     if display_df.empty:
         return f"_No producer data for the {view_label} view._"
 
-    lines.append(f"### Producer Insights ({view_label})")
+    lines.append(f"#### Producer Insights ({view_label})")
 
     coded = display_df[display_df["Total_Attributed_Revenue"] > 0].copy()
     zero_rev = display_df[display_df["Total_Attributed_Revenue"] == 0].copy()
@@ -470,7 +706,8 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("\U0001F377 Grand Cru Liquid Assets \u2014 Campaign Dashboard")
+# Inject global CSS
+st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
 
 
 # ─── Load data ───────────────────────────────────────────────────────────────
@@ -487,39 +724,63 @@ run_date = data["run_date"]
 full_df = data["df"]
 
 
-# ─── Sidebar (rendered AFTER data is loaded) ─────────────────────────────────
+# ─── Page Header ─────────────────────────────────────────────────────────────
+
+st.markdown(f"""
+<div class="page-header">
+    <div>
+        <div class="page-title">Grand Cru Liquid Assets</div>
+        <div class="page-subtitle">Campaign Performance Dashboard</div>
+    </div>
+    <div style="text-align: right;">
+        <div style="font-size: 0.75rem; color: {CLR_TEXT_MUTED}; text-transform: uppercase; letter-spacing: 0.05em;">Run Date</div>
+        <div style="font-size: 1rem; font-weight: 600; color: {CLR_TEXT_PRIMARY};">{run_date.strftime('%B %d, %Y')}</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ─── Sidebar ─────────────────────────────────────────────────────────────────
+
+excl_df = data["excluded_df"]
+unmatched_df = data["unmatched_df"]
 
 with st.sidebar:
-    st.header("Controls")
-    if st.button("\U0001F504 Refresh Data", type="primary", use_container_width=True):
+    if st.button("Refresh Data", type="primary", use_container_width=True):
         st.session_state.pop("data", None)
         st.rerun()
 
-    st.divider()
-    st.caption(f"Data scope: **{DATA_START_DATE}** onward")
+    st.markdown(f"""
+    <div style="margin-top: 1.5rem; font-size: 0.8rem; color: {CLR_TEXT_MUTED};">
+        Data from <strong style="color:{CLR_TEXT_SECONDARY};">{DATA_START_DATE}</strong><br>
+        <strong style="color:{CLR_TEXT_SECONDARY};">{data['main_count']}</strong> campaigns tracked
+    </div>
+    """, unsafe_allow_html=True)
 
-    st.metric("Run Date", str(data["run_date"]))
-    col1, col2 = st.columns(2)
-    col1.metric("Main", data["main_count"])
-    col2.metric("Excluded", data["excluded_count"])
+    # QA health summary
+    n_excluded = len(excl_df) if not excl_df.empty else 0
+    n_unmatched = len(unmatched_df) if not unmatched_df.empty else 0
+    qa_clean = n_excluded == 0 and n_unmatched == 0
+    qa_class = "qa-ok" if qa_clean else "qa-warn"
+    qa_icon = "\u2713" if qa_clean else "\u26A0"
 
-    # Excluded campaigns — expandable section
-    excl_df = data["excluded_df"]
-    if not excl_df.empty:
-        with st.expander(f"\u26A0\uFE0F Excluded Campaigns ({len(excl_df)})"):
-            for _, row in excl_df.iterrows():
-                name = row.get("Campaign Name", "Unknown")
-                bucket = row.get("QA Bucket", "")
-                st.markdown(f"- **{bucket}**: {name}")
+    st.markdown(f"""
+    <div style="margin-top: 1rem; padding: 0.75rem; background: {CLR_BG_PAGE}; border-radius: 6px; border: 1px solid {CLR_BORDER};">
+        <div style="font-size: 0.7rem; color: {CLR_TEXT_MUTED}; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem;">Data Quality</div>
+        <div class="{qa_class}" style="font-size: 0.85rem;">
+            {qa_icon} {n_excluded} excluded &middot; {n_unmatched} unmatched
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ─── Tabs ────────────────────────────────────────────────────────────────────
 
 tab_weekly, tab_monthly, tab_producer, tab_qa = st.tabs([
-    "\U0001F4C5 Weekly Report",
-    "\U0001F4CA Monthly Report",
-    "\U0001F3AD Producer Performance",
-    "\U0001F50D QA",
+    "Weekly",
+    "Monthly",
+    "Producers",
+    "QA",
 ])
 
 
@@ -529,14 +790,13 @@ tab_weekly, tab_monthly, tab_producer, tab_qa = st.tabs([
 
 with tab_weekly:
 
-    # ── Filter to completed week ──────────────────────────────────────────
+    # ── Scope / Context ──────────────────────────────────────────────────
     completed_week_df, wk_start, wk_end = _filter_completed_week(full_df, run_date)
 
-    st.subheader("Completed Weekly Campaign View")
-    st.caption(
-        f"Showing campaigns from **{wk_start}** to **{wk_end}** whose attribution "
-        f"windows have fully closed (standard: +7d, BIN/holiday: +3d). "
-        f"Only finalized results are included."
+    st.markdown(
+        f'<div class="context-line">Week of {wk_start.strftime("%b %d")} \u2013 '
+        f'{wk_end.strftime("%b %d, %Y")} &middot; Finalized campaigns only</div>',
+        unsafe_allow_html=True,
     )
 
     # Coded campaigns for charts
@@ -551,17 +811,20 @@ with tab_weekly:
             f"This may mean all campaigns in that window are still open."
         )
     else:
-        # Summary metrics
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Completed Campaigns", len(completed_week_df))
-        c2.metric("Total Delivered", f"{completed_week_df['Delivered'].sum():,}")
+        # ── KPI Row ──────────────────────────────────────────────────────
+        kpis = [
+            {"label": "Campaigns", "value": str(len(completed_week_df))},
+            {"label": "Total Delivered", "value": f"{completed_week_df['Delivered'].sum():,}"},
+        ]
         if not coded_week.empty:
-            c3.metric("Total Attr. Revenue", f"${coded_week['Attributed Revenue'].sum():,.2f}")
-            c4.metric("Total Orders", f"{coded_week['Discounted Orders'].dropna().sum():.0f}")
+            kpis.append({"label": "Attributed Revenue", "value": f"${coded_week['Attributed Revenue'].sum():,.2f}"})
+            kpis.append({"label": "Orders", "value": f"{coded_week['Discounted Orders'].dropna().sum():.0f}"})
+        render_kpi_row(kpis)
 
-        # ── Chart A: Performance ranking bar chart ────────────────────────
-        st.divider()
-        st.markdown("#### Chart A: Campaign Performance Ranking")
+        spacer("lg")
+
+        # ── Campaign Performance Ranking ─────────────────────────────────
+        section_title("Campaign Performance Ranking", "Ranked by selected metric")
 
         if not coded_week.empty:
             metric_choice = st.radio(
@@ -569,6 +832,7 @@ with tab_weekly:
                 ["Attributed Revenue", "Revenue per Delivered"],
                 horizontal=True,
                 key="weekly_bar_metric",
+                label_visibility="collapsed",
             )
 
             chart_data = coded_week[["Campaign Name", "Discount Code", metric_choice]].copy()
@@ -576,7 +840,10 @@ with tab_weekly:
 
             fmt = "$,.2f" if metric_choice == "Attributed Revenue" else "$,.4f"
 
-            bar_chart = alt.Chart(chart_data).mark_bar(color="#4e79a7").encode(
+            bar_chart = alt.Chart(chart_data).mark_bar(
+                color=CLR_WEEKLY,
+                cornerRadiusEnd=3,
+            ).encode(
                 y=alt.Y("Campaign Name:N", sort=None, title=None),
                 x=alt.X(f"{metric_choice}:Q", title=metric_choice),
                 tooltip=[
@@ -586,12 +853,14 @@ with tab_weekly:
                 ],
             ).properties(height=max(len(chart_data) * 40, 200))
 
-            st.altair_chart(bar_chart, use_container_width=True)
+            st.altair_chart(styled_chart(bar_chart), use_container_width=True)
         else:
             st.info("No coded campaigns with revenue data to chart.")
 
-        # ── Chart B: Delivered vs Revenue scatter ─────────────────────────
-        st.markdown("#### Chart B: Delivered vs Attributed Revenue")
+        spacer("lg")
+
+        # ── Delivery vs Revenue ──────────────────────────────────────────
+        section_title("Delivery vs Revenue", "Each dot represents one campaign")
 
         if not coded_week.empty and len(coded_week) >= 2:
             scatter_data = coded_week[[
@@ -599,14 +868,17 @@ with tab_weekly:
                 "Attributed Revenue", "Revenue per Delivered"
             ]].copy()
 
-            # Quadrant reference lines
             med_del = scatter_data["Delivered"].median()
             med_rev = scatter_data["Attributed Revenue"].median()
 
             scatter = alt.Chart(scatter_data).mark_circle(size=120, opacity=0.8).encode(
                 x=alt.X("Delivered:Q", title="Delivered"),
                 y=alt.Y("Attributed Revenue:Q", title="Attributed Revenue"),
-                color=alt.Color("Producer / Topic:N", legend=alt.Legend(title="Producer")),
+                color=alt.Color(
+                    "Producer / Topic:N",
+                    scale=alt.Scale(range=PALETTE_MULTI),
+                    legend=alt.Legend(title="Producer"),
+                ),
                 tooltip=[
                     alt.Tooltip("Campaign Name:N"),
                     alt.Tooltip("Producer / Topic:N"),
@@ -616,32 +888,53 @@ with tab_weekly:
                 ],
             )
 
-            # Quadrant lines
+            # Quadrant reference lines
             hline = alt.Chart(pd.DataFrame({"y": [med_rev]})).mark_rule(
-                strokeDash=[4, 4], color="gray", opacity=0.5
+                strokeDash=[4, 4], color=CLR_BORDER, opacity=0.7
             ).encode(y="y:Q")
 
             vline = alt.Chart(pd.DataFrame({"x": [med_del]})).mark_rule(
-                strokeDash=[4, 4], color="gray", opacity=0.5
+                strokeDash=[4, 4], color=CLR_BORDER, opacity=0.7
             ).encode(x="x:Q")
 
-            st.altair_chart(
-                (scatter + hline + vline).properties(height=400),
-                use_container_width=True,
+            # Quadrant text annotations
+            max_del = scatter_data["Delivered"].max()
+            min_del = scatter_data["Delivered"].min()
+            max_rev = scatter_data["Attributed Revenue"].max()
+            min_rev = scatter_data["Attributed Revenue"].min()
+            range_del = max_del - min_del if max_del != min_del else 1
+            range_rev = max_rev - min_rev if max_rev != min_rev else 1
+
+            quad_labels = pd.DataFrame([
+                {"x": max_del - range_del * 0.02, "y": max_rev - range_rev * 0.02, "text": "High reach, High revenue"},
+                {"x": min_del + range_del * 0.02, "y": max_rev - range_rev * 0.02, "text": "Low reach, High revenue"},
+                {"x": max_del - range_del * 0.02, "y": min_rev + range_rev * 0.02, "text": "High reach, Low revenue"},
+                {"x": min_del + range_del * 0.02, "y": min_rev + range_rev * 0.02, "text": "Low reach, Low revenue"},
+            ])
+            quad_text = alt.Chart(quad_labels).mark_text(
+                fontSize=10, color=CLR_TEXT_MUTED, fontWeight="normal",
+            ).encode(
+                x=alt.X("x:Q"),
+                y=alt.Y("y:Q"),
+                text="text:N",
             )
 
-            # Quadrant labels
-            q1, q2, q3, q4 = st.columns(4)
-            q1.caption("\u2197\uFE0F High delivery, High revenue")
-            q2.caption("\u2196\uFE0F Low delivery, High revenue")
-            q3.caption("\u2198\uFE0F High delivery, Low revenue")
-            q4.caption("\u2199\uFE0F Low delivery, Low revenue")
+            scatter_combined = (scatter + hline + vline + quad_text).properties(height=400)
+            st.altair_chart(styled_chart(scatter_combined), use_container_width=True)
         elif not coded_week.empty:
             st.info("Need at least 2 campaigns for the scatter plot.")
 
-        # ── Weekly data table ─────────────────────────────────────────────
-        st.divider()
-        st.markdown("#### Campaign Detail Table")
+        spacer("lg")
+
+        # ── Weekly Insights ──────────────────────────────────────────────
+        section_title("Weekly Performance Insights", "Analysis based on completed-week campaigns only")
+        insights_md = _generate_analytical_insights(completed_week_df, wk_start, wk_end)
+        render_insight_card(insights_md)
+
+        spacer("lg")
+
+        # ── Supporting Detail Table ──────────────────────────────────────
+        section_title("Campaign Details")
         display_cols = [
             "Parsed Send Date", "Discount Code", "Campaign Name",
             "Discounted Orders", "Delivered", "Attributed Revenue",
@@ -651,30 +944,28 @@ with tab_weekly:
         st.dataframe(
             completed_week_df[available],
             column_config={
-                "Attributed Revenue": st.column_config.NumberColumn(format="$%.2f"),
-                "Revenue per Delivered": st.column_config.NumberColumn(format="$%.4f"),
+                "Parsed Send Date": st.column_config.DateColumn("Send Date", width="small"),
+                "Campaign Name": st.column_config.TextColumn("Campaign", width="large"),
+                "Discount Code": st.column_config.TextColumn("Code", width="medium"),
+                "Attributed Revenue": st.column_config.NumberColumn("Revenue", format="$%.2f"),
+                "Revenue per Delivered": st.column_config.NumberColumn("Rev/Delivered", format="$%.4f"),
             },
             use_container_width=True,
             hide_index=True,
         )
 
-    # ── Analytical insights ───────────────────────────────────────────────
-    st.divider()
-    st.subheader("Weekly Performance Insights")
-    st.caption("_Analysis based on completed-week campaigns only_")
-    insights_md = _generate_analytical_insights(completed_week_df, wk_start, wk_end)
-    st.markdown(insights_md)
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Tab 2: Monthly Report — All Campaigns in Month
+# Tab 2: Monthly Report
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab_monthly:
-    st.subheader("Monthly Campaign Report")
-    st.caption(
-        f"All finalized campaigns in **{run_date.strftime('%B %Y')}**. "
-        f"Only campaigns with closed attribution windows are included."
+
+    # ── Scope / Context ──────────────────────────────────────────────────
+    st.markdown(
+        f'<div class="context-line">{run_date.strftime("%B %Y")} &middot; '
+        f'Finalized campaigns with closed attribution windows</div>',
+        unsafe_allow_html=True,
     )
 
     monthly_df = data["monthly_df"]
@@ -698,17 +989,19 @@ with tab_monthly:
             "Campaigns appear here once their attribution window closes."
         )
     else:
-        # Summary metrics
+        # ── KPI Row ──────────────────────────────────────────────────────
         total_rev = monthly_df["Total_Attributed_Revenue"].sum() if not monthly_df.empty else 0
         total_orders = monthly_df["Total_Discounted_Orders"].sum() if not monthly_df.empty else 0
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Revenue", f"${total_rev:,.2f}")
-        c2.metric("Total Orders", f"{total_orders:.0f}")
-        c3.metric("Discount Codes", len(monthly_df) if not monthly_df.empty else 0)
+        render_kpi_row([
+            {"label": "Total Revenue", "value": f"${total_rev:,.2f}"},
+            {"label": "Total Orders", "value": f"{total_orders:.0f}"},
+            {"label": "Discount Codes", "value": str(len(monthly_df) if not monthly_df.empty else 0)},
+        ])
 
-        # ── Chart C: Weekly comparison within month ───────────────────────
-        st.divider()
-        st.markdown("#### Chart C: Weekly Performance Comparison")
+        spacer("lg")
+
+        # ── Weekly Revenue Trend ─────────────────────────────────────────
+        section_title("Weekly Revenue Trend", "Total and average revenue by week within the month")
 
         if not all_month.empty:
             all_month["Week"] = all_month["_send_dt"].dt.isocalendar().week.astype(str)
@@ -726,7 +1019,7 @@ with tab_monthly:
                 x=alt.X("Week_Start:N", title="Week Starting", sort=None),
             )
 
-            bars = base.mark_bar(color="#4e79a7", opacity=0.7).encode(
+            bars = base.mark_bar(color=CLR_MONTHLY, opacity=0.7, cornerRadiusEnd=3).encode(
                 y=alt.Y("Total_Revenue:Q", title="Total Attributed Revenue"),
                 tooltip=[
                     alt.Tooltip("Week_Start:N", title="Week of"),
@@ -735,7 +1028,7 @@ with tab_monthly:
                 ],
             )
 
-            line = base.mark_line(color="#e15759", strokeWidth=3, point=True).encode(
+            line = base.mark_line(color=CLR_MONTHLY_LINE, strokeWidth=3, point=True).encode(
                 y=alt.Y("Avg_Revenue:Q", title="Avg Campaign Revenue"),
                 tooltip=[
                     alt.Tooltip("Avg_Revenue:Q", format="$,.2f", title="Avg Revenue/Campaign"),
@@ -743,22 +1036,25 @@ with tab_monthly:
             )
 
             combo = alt.layer(bars, line).resolve_scale(y="independent").properties(height=350)
-            st.altair_chart(combo, use_container_width=True)
+            st.altair_chart(styled_chart(combo), use_container_width=True)
             st.caption(
-                "\U0001F7E6 Bars = total weekly revenue | "
-                "\U0001F534 Line = average revenue per campaign"
+                f"Bars = total weekly revenue \u00b7 Line = average revenue per campaign"
             )
         else:
             st.info("No weekly data to chart.")
 
-        # ── Chart D: Top 3 discount codes ─────────────────────────────────
-        st.divider()
-        st.markdown("#### Chart D: Top 3 Discount Codes This Month")
+        spacer("lg")
+
+        # ── Top Discount Codes ───────────────────────────────────────────
+        section_title("Top Discount Codes", "Highest revenue-generating codes this month")
 
         if not monthly_df.empty:
             top3 = monthly_df.head(3).copy()
 
-            top3_chart = alt.Chart(top3).mark_bar(color="#59a14f").encode(
+            top3_chart = alt.Chart(top3).mark_bar(
+                color=CLR_MONTHLY,
+                cornerRadiusEnd=3,
+            ).encode(
                 x=alt.X("Total_Attributed_Revenue:Q", title="Attributed Revenue"),
                 y=alt.Y("Discount Code:N", sort=None, title=None),
                 tooltip=[
@@ -769,24 +1065,25 @@ with tab_monthly:
                 ],
             ).properties(height=max(len(top3) * 50, 120))
 
-            st.altair_chart(top3_chart, use_container_width=True)
+            st.altair_chart(styled_chart(top3_chart), use_container_width=True)
 
-        # ── Chart E: Discount code contribution (stacked) ────────────────
-        st.divider()
-        st.markdown("#### Chart E: Discount Code Revenue Breakdown by Campaign")
+        spacer("lg")
+
+        # ── Revenue by Campaign Breakdown ────────────────────────────────
+        section_title("Revenue by Campaign", "How each discount code's revenue splits across campaigns")
 
         if not all_month.empty:
             contrib = all_month[["Discount Code", "Campaign Name", "Attributed Revenue"]].copy()
             contrib = contrib.sort_values("Attributed Revenue", ascending=False)
 
-            # Order discount codes by total revenue
             code_order = contrib.groupby("Discount Code")["Attributed Revenue"].sum().sort_values(ascending=False).index.tolist()
 
-            stacked = alt.Chart(contrib).mark_bar().encode(
+            stacked = alt.Chart(contrib).mark_bar(cornerRadiusEnd=2).encode(
                 y=alt.Y("Discount Code:N", sort=code_order, title=None),
                 x=alt.X("Attributed Revenue:Q", title="Attributed Revenue", stack="zero"),
                 color=alt.Color(
                     "Campaign Name:N",
+                    scale=alt.Scale(range=PALETTE_MULTI),
                     legend=alt.Legend(title="Campaign", orient="bottom", columns=2),
                 ),
                 tooltip=[
@@ -796,35 +1093,41 @@ with tab_monthly:
                 ],
             ).properties(height=max(len(code_order) * 45, 150))
 
-            st.altair_chart(stacked, use_container_width=True)
+            st.altair_chart(styled_chart(stacked), use_container_width=True)
         else:
             st.info("No data for discount code breakdown.")
 
-        # ── Monthly data table ────────────────────────────────────────────
-        st.divider()
-        st.markdown("#### Discount Code Summary Table")
+        spacer("lg")
+
+        # ── Monthly Insights ─────────────────────────────────────────────
+        section_title("Monthly Insights")
+        monthly_insights_md = _generate_monthly_insights(monthly_df, all_month)
+        render_insight_card(monthly_insights_md)
+
+        spacer("lg")
+
+        # ── Supporting Detail Table ──────────────────────────────────────
+        section_title("Discount Code Summary")
         if not monthly_df.empty:
             st.dataframe(
                 monthly_df,
                 column_config={
                     "Total_Attributed_Revenue": st.column_config.NumberColumn(
-                        "Total Attributed Revenue", format="$%.2f"
+                        "Total Revenue", format="$%.2f"
                     ),
                     "Total_Discount_Value": st.column_config.NumberColumn(
-                        "Total Discount Value", format="$%.2f"
+                        "Discount Value", format="$%.2f"
                     ),
-                    "Avg Revenue per Campaign": st.column_config.NumberColumn(format="$%.2f"),
-                    "Avg Revenue per Delivered": st.column_config.NumberColumn(format="$%.4f"),
+                    "Avg Revenue per Campaign": st.column_config.NumberColumn(
+                        "Avg Rev/Campaign", format="$%.2f"
+                    ),
+                    "Avg Revenue per Delivered": st.column_config.NumberColumn(
+                        "Avg Rev/Delivered", format="$%.4f"
+                    ),
                 },
                 use_container_width=True,
                 hide_index=True,
             )
-
-        # ── Monthly insights ──────────────────────────────────────────────
-        st.divider()
-        st.subheader("Monthly Insights")
-        monthly_insights_md = _generate_monthly_insights(monthly_df, all_month)
-        st.markdown(monthly_insights_md)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -832,7 +1135,12 @@ with tab_monthly:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab_producer:
-    st.subheader("Producer Performance")
+
+    # ── Scope / Context + View Toggle ────────────────────────────────────
+    st.markdown(
+        f'<div class="context-line">Producer-level aggregation &middot; All tracked campaigns</div>',
+        unsafe_allow_html=True,
+    )
 
     view = st.radio(
         "View",
@@ -840,6 +1148,7 @@ with tab_producer:
         horizontal=True,
         help="Current-to-date includes all main-table campaigns. "
              "Finalized-only includes only campaigns whose attribution window has closed.",
+        label_visibility="collapsed",
     )
 
     if view == "current-to-date":
@@ -852,15 +1161,17 @@ with tab_producer:
     else:
         display_df = prod_df.drop(columns=["View"], errors="ignore")
 
-        # Summary metrics
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Revenue", f"${display_df['Total_Attributed_Revenue'].sum():,.2f}")
-        c2.metric("Producers", len(display_df))
-        c3.metric("Total Campaigns", f"{display_df['Campaign_Count'].sum():.0f}")
+        # ── KPI Row ──────────────────────────────────────────────────────
+        render_kpi_row([
+            {"label": "Total Revenue", "value": f"${display_df['Total_Attributed_Revenue'].sum():,.2f}"},
+            {"label": "Producers", "value": str(len(display_df))},
+            {"label": "Total Campaigns", "value": f"{display_df['Campaign_Count'].sum():.0f}"},
+        ])
 
-        # ── Chart F: Producer ranking bar chart ───────────────────────────
-        st.divider()
-        st.markdown("#### Chart F: Producer Performance Ranking")
+        spacer("lg")
+
+        # ── Producer Revenue Ranking ─────────────────────────────────────
+        section_title("Producer Revenue Ranking", "Ranked by selected metric")
 
         prod_metric = st.radio(
             "Rank by",
@@ -872,6 +1183,7 @@ with tab_producer:
             }.get(x, x),
             horizontal=True,
             key="producer_bar_metric",
+            label_visibility="collapsed",
         )
 
         chart_prod = display_df[["Producer / Topic", prod_metric]].copy()
@@ -885,7 +1197,10 @@ with tab_producer:
         else:
             fmt = ",.0f"
 
-        prod_bar = alt.Chart(chart_prod).mark_bar(color="#e15759").encode(
+        prod_bar = alt.Chart(chart_prod).mark_bar(
+            color=CLR_PRODUCER,
+            cornerRadiusEnd=3,
+        ).encode(
             y=alt.Y("Producer / Topic:N", sort=None, title=None),
             x=alt.X(f"{prod_metric}:Q", title=prod_metric.replace("_", " ")),
             tooltip=[
@@ -894,58 +1209,100 @@ with tab_producer:
             ],
         ).properties(height=max(len(chart_prod) * 35, 200))
 
-        st.altair_chart(prod_bar, use_container_width=True)
+        st.altair_chart(styled_chart(prod_bar), use_container_width=True)
 
-        # ── Producer data table ───────────────────────────────────────────
-        st.divider()
-        st.markdown("#### Producer Detail Table")
+        spacer("lg")
+
+        # ── Producer Insights ────────────────────────────────────────────
+        section_title("Producer Insights")
+        render_insight_card(_generate_producer_insights(display_df, view))
+
+        spacer("lg")
+
+        # ── Supporting Detail Table ──────────────────────────────────────
+        section_title("Producer Details")
         st.dataframe(
             display_df,
             column_config={
                 "Total_Attributed_Revenue": st.column_config.NumberColumn(
-                    "Total Attributed Revenue", format="$%.2f"
+                    "Total Revenue", format="$%.2f"
                 ),
-                "Revenue per Delivered": st.column_config.NumberColumn(format="$%.4f"),
-                "Avg Revenue per Campaign": st.column_config.NumberColumn(format="$%.2f"),
+                "Revenue per Delivered": st.column_config.NumberColumn(
+                    "Rev/Delivered", format="$%.4f"
+                ),
+                "Avg Revenue per Campaign": st.column_config.NumberColumn(
+                    "Avg Rev/Campaign", format="$%.2f"
+                ),
             },
             use_container_width=True,
             hide_index=True,
         )
 
-        # ── Producer analytical insights ──────────────────────────────────
-        st.divider()
-        st.markdown(_generate_producer_insights(display_df, view))
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Tab 4: QA
+# Tab 4: QA — Data Quality & Diagnostics
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab_qa:
-    st.subheader("Unmatched Shopify Discount Codes")
 
-    unmatched_df = data["unmatched_df"]
-    if unmatched_df.empty:
-        st.success("No unmatched discount codes.")
-    else:
-        reasons = ["All"] + sorted(unmatched_df["Possible Reason"].unique().tolist())
-        selected = st.selectbox("Filter by reason", reasons)
+    # ── QA Health Summary ────────────────────────────────────────────────
+    st.markdown(
+        f'<div class="context-line">Data quality checks and diagnostic information</div>',
+        unsafe_allow_html=True,
+    )
 
-        display_um = unmatched_df
-        if selected != "All":
-            display_um = unmatched_df[unmatched_df["Possible Reason"] == selected]
+    n_excluded = len(excl_df) if not excl_df.empty else 0
+    n_unmatched = len(unmatched_df) if not unmatched_df.empty else 0
+    qa_status = "Clean" if (n_excluded == 0 and n_unmatched == 0) else "Needs Review"
 
-        st.caption(f"{len(display_um)} unmatched code(s)")
-        st.dataframe(
-            display_um,
-            column_config={
-                "Total Discount Amount": st.column_config.NumberColumn(format="$%.2f"),
-                "Total Order Value": st.column_config.NumberColumn(format="$%.2f"),
-            },
-            use_container_width=True,
-            hide_index=True,
-        )
+    render_kpi_row([
+        {"label": "Excluded Campaigns", "value": str(n_excluded)},
+        {"label": "Unmatched Codes", "value": str(n_unmatched)},
+        {"label": "QA Status", "value": qa_status},
+    ])
 
-    st.divider()
-    st.subheader("QA Summary")
-    st.code(data["qa_summary"], language=None)
+    spacer("lg")
+
+    # ── Excluded Campaigns ───────────────────────────────────────────────
+    with st.expander(f"Excluded Campaigns ({n_excluded})", expanded=False):
+        if not excl_df.empty:
+            st.dataframe(
+                excl_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.markdown(
+                f'<p style="color:{CLR_TEXT_MUTED}; font-size:0.85rem;">No excluded campaigns.</p>',
+                unsafe_allow_html=True,
+            )
+
+    # ── Unmatched Discount Codes ─────────────────────────────────────────
+    with st.expander(f"Unmatched Shopify Discount Codes ({n_unmatched})", expanded=False):
+        if not unmatched_df.empty:
+            reasons = ["All"] + sorted(unmatched_df["Possible Reason"].unique().tolist())
+            selected = st.selectbox("Filter by reason", reasons, key="qa_reason_filter")
+
+            display_um = unmatched_df
+            if selected != "All":
+                display_um = unmatched_df[unmatched_df["Possible Reason"] == selected]
+
+            st.caption(f"{len(display_um)} unmatched code(s)")
+            st.dataframe(
+                display_um,
+                column_config={
+                    "Total Discount Amount": st.column_config.NumberColumn(format="$%.2f"),
+                    "Total Order Value": st.column_config.NumberColumn(format="$%.2f"),
+                },
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.markdown(
+                f'<p style="color:{CLR_TEXT_MUTED}; font-size:0.85rem;">No unmatched discount codes.</p>',
+                unsafe_allow_html=True,
+            )
+
+    # ── QA Summary ───────────────────────────────────────────────────────
+    with st.expander("Full QA Summary", expanded=False):
+        st.code(data["qa_summary"], language=None)
