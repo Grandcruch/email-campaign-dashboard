@@ -30,7 +30,6 @@ from src.families import load_family_mapping, is_family_key, get_family_identifi
 from src.reports import (
     assemble_dashboard_rows,
     rows_to_dataframe,
-    apply_bin_grouping,
     generate_weekly_report,
     generate_weekly_insights,
     generate_monthly_report,
@@ -287,37 +286,6 @@ def spacer(size: str = "md"):
     st.markdown(f'<div class="spacer-{size}"></div>', unsafe_allow_html=True)
 
 
-def _get_available_send_weeks(df: pd.DataFrame, run_date: date, finalized_only: bool) -> list[tuple[date, date]]:
-    """
-    Return all send weeks (Mon-Sun) that have at least one campaign,
-    sorted most recent first.
-
-    If finalized_only=True, only include weeks where run_date >= sunday + 7
-    (the longest attribution window), meaning all campaigns in that week
-    are guaranteed to have closed attribution windows.
-    """
-    from src.config import DEFAULT_ATTRIBUTION_WINDOW_DAYS
-    max_window = DEFAULT_ATTRIBUTION_WINDOW_DAYS  # 7
-
-    dates = pd.to_datetime(df["Parsed Send Date"].dropna()).dt.date
-    if dates.empty:
-        return []
-
-    # Get unique week Mondays
-    mondays = set()
-    for d in dates:
-        monday = d - timedelta(days=d.weekday())
-        mondays.add(monday)
-
-    weeks = []
-    for monday in sorted(mondays, reverse=True):
-        sunday = monday + timedelta(days=6)
-        if finalized_only:
-            if run_date < sunday + timedelta(days=max_window):
-                continue
-        weeks.append((monday, sunday))
-
-    return weeks
 
 
 def _generate_analytical_insights(cdf: pd.DataFrame, week_start: date, week_end: date) -> str:
@@ -889,13 +857,29 @@ tab_weekly, tab_monthly, tab_producer, tab_qa = st.tabs([
 
 with tab_weekly:
 
-    # ── Week Selector ────────────────────────────────────────────────────
-    col_toggle, col_select = st.columns([1, 3])
+    # ── Date Range Selector ──────────────────────────────────────────────
+    col_toggle, col_dates = st.columns([1, 3])
 
     with col_toggle:
         finalized_only = st.toggle("Finalized only", value=True, key="wk_finalized_toggle")
 
-    available_weeks = _get_available_send_weeks(full_df, run_date, finalized_only)
+    # Determine date bounds from available data
+    _all_send_dates = pd.to_datetime(full_df["Parsed Send Date"].dropna()).dt.date
+    _min_date = _all_send_dates.min() if not _all_send_dates.empty else DATA_START_DATE
+    _max_date = _all_send_dates.max() if not _all_send_dates.empty else run_date
+
+    # Default: most recent full week (Mon-Sun)
+    _default_end = run_date
+    _default_start = _default_end - timedelta(days=6)
+
+    with col_dates:
+        date_range = st.date_input(
+            "Date range",
+            value=(_default_start, _default_end),
+            min_value=_min_date,
+            max_value=run_date,
+            key="wk_date_range",
+        )
 
     # Initialize to empty so references below are always safe
     completed_week_df = pd.DataFrame()
@@ -903,25 +887,11 @@ with tab_weekly:
     wk_start = wk_end = None
     _weekly_has_data = False
 
-    if not available_weeks:
-        st.info(
-            "No send weeks available with the current filter. "
-            + ("Try turning off 'Finalized only' to see weeks with open attribution windows."
-               if finalized_only else "No campaigns found.")
-        )
-    else:
-        week_labels = [
-            f"{mon.strftime('%b %d')} \u2013 {sun.strftime('%b %d, %Y')}"
-            for mon, sun in available_weeks
-        ]
-        with col_select:
-            selected_label = st.selectbox(
-                "Send week", week_labels, index=0, key="wk_selector",
-            )
-        selected_idx = week_labels.index(selected_label)
-        wk_start, wk_end = available_weeks[selected_idx]
+    # date_input returns a tuple only when both dates are picked
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        wk_start, wk_end = date_range[0], date_range[1]
 
-        # Filter DataFrame to selected week
+        # Filter DataFrame to selected date range
         mask = (
             full_df["Parsed Send Date"].notna() &
             (pd.to_datetime(full_df["Parsed Send Date"]).dt.date >= wk_start) &
@@ -934,14 +904,11 @@ with tab_weekly:
                 completed_week_df["is_final_snapshot"] == True
             ].copy()
 
-        # Apply BIN Sale grouping for reporting view
-        completed_week_df = apply_bin_grouping(completed_week_df)
-
         # Context label
         fin_label = "Finalized campaigns only" if finalized_only else "All campaigns (includes open windows)"
         st.markdown(
             f'<div class="context-line">{fin_label} &middot; '
-            f'Week of {wk_start.strftime("%b %d")} \u2013 {wk_end.strftime("%b %d, %Y")}</div>',
+            f'{wk_start.strftime("%b %d")} \u2013 {wk_end.strftime("%b %d, %Y")}</div>',
             unsafe_allow_html=True,
         )
 
@@ -954,8 +921,8 @@ with tab_weekly:
         _weekly_has_data = not completed_week_df.empty
 
     if not _weekly_has_data:
-        if available_weeks:
-            st.info("No campaigns in the selected week match the current filter.")
+        if wk_start is not None:
+            st.info("No campaigns in the selected date range match the current filter.")
     else:
         # ── KPI Row ──────────────────────────────────────────────────────
         kpis = [
@@ -1141,7 +1108,7 @@ with tab_monthly:
         (all_month["_send_dt"].dt.year == run_date.year) &
         (all_month["_send_dt"].dt.month == run_date.month)
     ]
-    all_month = apply_bin_grouping(all_month)
+
 
     if monthly_df.empty and all_month.empty:
         st.info(
@@ -1166,10 +1133,10 @@ with tab_monthly:
         section_title("Weekly Revenue Trend", "Total and average revenue by week within the month")
 
         if not all_month.empty:
+            all_month["_send_dt"] = pd.to_datetime(all_month["_send_dt"])
             all_month["Week"] = all_month["_send_dt"].dt.isocalendar().week.astype(str)
-            all_month["Week_Start"] = all_month["_send_dt"].apply(
-                lambda d: (d - timedelta(days=d.weekday())).strftime("%m/%d")
-            )
+            _monday = all_month["_send_dt"] - pd.to_timedelta(all_month["_send_dt"].dt.weekday, unit="D")
+            all_month["Week_Start"] = _monday.dt.strftime("%m/%d")
 
             weekly_agg = all_month.groupby("Week_Start").agg(
                 Attributed_Revenue=("Attributed Revenue", "sum"),
