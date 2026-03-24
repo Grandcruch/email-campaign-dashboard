@@ -659,48 +659,36 @@ def run_pipeline() -> dict:
                         p.attribution_window_days,
                     ))
 
-        # Standard code attribution
+        # Attribution dict is keyed by "code|send_date" so each campaign
+        # gets its own attribution result for its own window, even if
+        # multiple campaigns share the same discount code / family key.
         seen = set()
+
+        # Standard code attribution
         for code, send_date, window in attribution_tasks:
-            key = f"{code.lower()}|{send_date}|{window}"
-            if key in seen:
+            dedup_key = f"{code.lower()}|{send_date}|{window}"
+            if dedup_key in seen:
                 continue
-            seen.add(key)
+            seen.add(dedup_key)
             status.update(label=f"Attributing: {code}...")
             attr = compute_attribution(shopify_auth, code, send_date, window)
-            code_lower = code.lower()
-            if code_lower not in attributions or (
-                send_date and send_date > (
-                    attributions[code_lower]._send_date
-                    if hasattr(attributions[code_lower], '_send_date')
-                    else date.min
-                )
-            ):
-                attr._send_date = send_date  # type: ignore
-                attributions[code_lower] = attr
+            storage_key = f"{code.lower()}|{send_date}"
+            attributions[storage_key] = attr
 
         # Family / multi-code attribution
         for family_key, send_date, window in family_tasks:
-            key = f"{family_key.lower()}|{send_date}|{window}"
-            if key in seen:
+            dedup_key = f"{family_key.lower()}|{send_date}|{window}"
+            if dedup_key in seen:
                 continue
-            seen.add(key)
+            seen.add(dedup_key)
             members = get_family_identifiers(family_key, families)
             title_ids = [m.identifier for m in members]
             status.update(label=f"Attributing family: {family_key} ({len(title_ids)} codes)...")
             attr = compute_family_attribution(
                 shopify_auth, family_key, title_ids, send_date, window,
             )
-            code_lower = family_key.lower()
-            if code_lower not in attributions or (
-                send_date and send_date > (
-                    attributions[code_lower]._send_date
-                    if hasattr(attributions[code_lower], '_send_date')
-                    else date.min
-                )
-            ):
-                attr._send_date = send_date  # type: ignore
-                attributions[code_lower] = attr
+            storage_key = f"{family_key.lower()}|{send_date}"
+            attributions[storage_key] = attr
 
         # Step 5: Assemble dashboard
         status.update(label="Assembling dashboard rows...")

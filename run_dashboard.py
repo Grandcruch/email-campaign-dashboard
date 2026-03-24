@@ -105,40 +105,35 @@ def main():
                     p.attribution_window_days,
                 ))
 
-    # Standard code attribution
+    # Attribution dict keyed by "code|send_date" so each campaign gets
+    # its own result for its own window.
     seen = set()
+
+    # Standard code attribution
     for code, send_date, window in attribution_tasks:
-        key = f"{code.lower()}|{send_date}|{window}"
-        if key in seen:
+        dedup_key = f"{code.lower()}|{send_date}|{window}"
+        if dedup_key in seen:
             continue
-        seen.add(key)
+        seen.add(dedup_key)
         print(f"  Attributing: {code} (window: {send_date} + {window}d)...")
         attr = compute_attribution(shopify_auth, code, send_date, window)
-        code_lower = code.lower()
-        if code_lower not in attributions or (
-            send_date and send_date > (attributions[code_lower]._send_date if hasattr(attributions[code_lower], '_send_date') else date.min)
-        ):
-            attr._send_date = send_date  # type: ignore
-            attributions[code_lower] = attr
+        storage_key = f"{code.lower()}|{send_date}"
+        attributions[storage_key] = attr
 
     # Family / multi-code attribution
     for family_key, send_date, window in family_tasks:
-        key = f"{family_key.lower()}|{send_date}|{window}"
-        if key in seen:
+        dedup_key = f"{family_key.lower()}|{send_date}|{window}"
+        if dedup_key in seen:
             continue
-        seen.add(key)
+        seen.add(dedup_key)
         members = get_family_identifiers(family_key, families)
         title_ids = [m.identifier for m in members]
         print(f"  Attributing family: {family_key} -> {title_ids} (window: {send_date} + {window}d)...")
         attr = compute_family_attribution(
             shopify_auth, family_key, title_ids, send_date, window,
         )
-        code_lower = family_key.lower()
-        if code_lower not in attributions or (
-            send_date and send_date > (attributions[code_lower]._send_date if hasattr(attributions[code_lower], '_send_date') else date.min)
-        ):
-            attr._send_date = send_date  # type: ignore
-            attributions[code_lower] = attr
+        storage_key = f"{family_key.lower()}|{send_date}"
+        attributions[storage_key] = attr
 
     print(f"  Attribution computed for {len(attributions)} discount code(s)")
 

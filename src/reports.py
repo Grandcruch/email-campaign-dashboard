@@ -106,8 +106,13 @@ def assemble_dashboard_rows(
             row.discounted_orders = None
             row.revenue_per_delivered = None
         else:
-            code_key = p.discount_code.lower()
-            attr = attributions.get(code_key)
+            # Look up by compound key "code|send_date" first (supports
+            # multiple campaigns sharing the same code with different windows).
+            # Fall back to code-only key for backward compatibility.
+            compound_key = f"{p.discount_code.lower()}|{p.parsed_send_date}"
+            attr = attributions.get(compound_key)
+            if attr is None:
+                attr = attributions.get(p.discount_code.lower())
             if attr and attr.discounted_orders > 0:
                 row.attributed_revenue = round(attr.attributed_revenue, 2)
                 row.discount_value = round(attr.discount_value, 2)
