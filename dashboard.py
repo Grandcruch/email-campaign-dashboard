@@ -285,42 +285,54 @@ def spacer(size: str = "md"):
     st.markdown(f'<div class="spacer-{size}"></div>', unsafe_allow_html=True)
 
 
-def _get_completed_week_range(run_date: date) -> tuple[date, date]:
+def _get_latest_finalized_send_week(run_date: date) -> tuple[date, date]:
     """
-    Return the most recent COMPLETED week range for campaign analysis.
-    A campaign is 'completed' when its attribution window has fully closed.
-    The longest window is 7 days, so the latest completed send date is
-    run_date - 8 days (sent 8 days ago => 7-day window closed yesterday).
-    We show a full Mon-Sun week that falls within the completed range.
+    Return the most recent fully-finalized send week (Mon-Sun).
+
+    A send week is "fully finalized" when every campaign in that week has
+    had its attribution window close.  The longest attribution window is
+    7 days, so the last campaign in the week (sent on Sunday) finalizes on
+    Sunday + 7.  Therefore a send week ending on Sunday S is fully finalized
+    when run_date >= S + 7.
+
+    We walk backwards from the current week to find the latest such week.
     """
-    latest_completed = run_date - timedelta(days=8)
-    week_end = latest_completed
-    week_start = week_end - timedelta(days=week_end.weekday())  # Monday
-    week_end = week_start + timedelta(days=6)
-    return week_start, week_end
+    from src.config import DEFAULT_ATTRIBUTION_WINDOW_DAYS
+
+    max_window = DEFAULT_ATTRIBUTION_WINDOW_DAYS  # 7
+
+    # Start from the current calendar week's Monday
+    current_monday = run_date - timedelta(days=run_date.weekday())
+
+    # Check weeks going backwards (current, then previous, etc.)
+    for weeks_back in range(0, 52):
+        candidate_monday = current_monday - timedelta(weeks=weeks_back)
+        candidate_sunday = candidate_monday + timedelta(days=6)
+        # This week is fully finalized if run_date >= sunday + max_window
+        if run_date >= candidate_sunday + timedelta(days=max_window):
+            return candidate_monday, candidate_sunday
+
+    # Fallback — shouldn't happen with real data
+    fallback_monday = current_monday - timedelta(weeks=2)
+    return fallback_monday, fallback_monday + timedelta(days=6)
 
 
-def _filter_completed_campaigns(df: pd.DataFrame, run_date: date) -> pd.DataFrame:
+def _filter_finalized_send_week(df: pd.DataFrame, run_date: date) -> tuple[pd.DataFrame, date, date]:
     """
-    Filter to only campaigns whose attribution window has fully closed.
-    is_final_snapshot == True is the definitive marker.
-    """
-    return df[df["is_final_snapshot"] == True].copy()
+    Filter to campaigns sent during the latest fully-finalized send week.
 
+    This returns ONLY the one-week cohort — not all finalized campaigns,
+    not the current week, and not a rolling window.
 
-def _filter_completed_week(df: pd.DataFrame, run_date: date) -> tuple[pd.DataFrame, date, date]:
+    Returns (filtered_df, week_start_monday, week_end_sunday).
     """
-    Filter to completed campaigns within the most recent completed week.
-    Returns (filtered_df, week_start, week_end).
-    """
-    completed = _filter_completed_campaigns(df, run_date)
-    week_start, week_end = _get_completed_week_range(run_date)
+    week_start, week_end = _get_latest_finalized_send_week(run_date)
     mask = (
-        completed["Parsed Send Date"].notna() &
-        (pd.to_datetime(completed["Parsed Send Date"]).dt.date >= week_start) &
-        (pd.to_datetime(completed["Parsed Send Date"]).dt.date <= week_end)
+        df["Parsed Send Date"].notna() &
+        (pd.to_datetime(df["Parsed Send Date"]).dt.date >= week_start) &
+        (pd.to_datetime(df["Parsed Send Date"]).dt.date <= week_end)
     )
-    return completed[mask].copy(), week_start, week_end
+    return df[mask].copy(), week_start, week_end
 
 
 def _generate_analytical_insights(cdf: pd.DataFrame, week_start: date, week_end: date) -> str:
@@ -792,11 +804,13 @@ tab_weekly, tab_monthly, tab_producer, tab_qa = st.tabs([
 with tab_weekly:
 
     # ── Scope / Context ──────────────────────────────────────────────────
-    completed_week_df, wk_start, wk_end = _filter_completed_week(full_df, run_date)
+    completed_week_df, wk_start, wk_end = _filter_finalized_send_week(full_df, run_date)
 
+    st.subheader("Weekly Report — Finalized Campaign Cohort")
     st.markdown(
-        f'<div class="context-line">Week of {wk_start.strftime("%b %d")} \u2013 '
-        f'{wk_end.strftime("%b %d, %Y")} &middot; Finalized campaigns only</div>',
+        f'<div class="context-line">Showing campaigns sent during '
+        f'{wk_start.strftime("%b %d")} \u2013 {wk_end.strftime("%b %d, %Y")} '
+        f'&middot; This is the latest send week where all attribution windows have closed</div>',
         unsafe_allow_html=True,
     )
 
@@ -808,8 +822,9 @@ with tab_weekly:
 
     if completed_week_df.empty:
         st.info(
-            f"No completed campaigns for the week of {wk_start} to {wk_end}. "
-            f"This may mean all campaigns in that window are still open."
+            f"No campaigns were sent during {wk_start.strftime('%b %d')} \u2013 "
+            f"{wk_end.strftime('%b %d, %Y')}. The weekly report will populate "
+            f"once campaigns exist for this finalized send week."
         )
     else:
         # ── KPI Row ──────────────────────────────────────────────────────
