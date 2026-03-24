@@ -1,0 +1,3 @@
+hubspot_email_name,override_send_date,override_producer_topic,override_campaign_type,override_offer_value,override_discount_code,override_window_days,force_include,force_exclude,notes
+2026-0314 - BIN Sale - PROD - 10% - BinSale10,2026-03-14,,,,BINSALE_GROUP,,,,BIN Sale family: BinSale10 + BinSale12
+2026-0316 - BIN Sale Reminder - PROD - 10% - BinSale10,2026-03-16,,,,BINSALE_GROUP,,,,BIN Sale Reminder family: BinSale10 + BinSale12

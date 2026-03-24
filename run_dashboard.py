@@ -22,7 +22,8 @@ from src.auth import ShopifyAuth, hubspot_headers
 from src.hubspot import fetch_campaigns, CampaignRecord
 from src.parser import ParsedCampaign
 from src.overrides import load_overrides, apply_overrides
-from src.shopify_orders import compute_attribution, fetch_all_discount_codes_in_range
+from src.shopify_orders import compute_attribution, compute_family_attribution, fetch_all_discount_codes_in_range
+from src.families import load_family_mapping, is_family_key, get_family_identifiers
 from src.reports import (
     assemble_dashboard_rows,
     rows_to_dataframe,
@@ -56,9 +57,10 @@ def main():
         client_secret=env["SHOPIFY_CLIENT_SECRET"],
     )
 
-    # ── Step 2: Load overrides ───────────────────────────────────────────
+    # ── Step 2: Load overrides + family mappings ─────────────────────────
     print("\n[2/8] Loading campaign overrides...")
     overrides = load_overrides()
+    families = load_family_mapping()
 
     # ── Step 3: Fetch HubSpot campaigns ──────────────────────────────────
     print("\n[3/8] Fetching HubSpot campaigns...")
@@ -66,6 +68,12 @@ def main():
 
     # Apply overrides
     apply_overrides(records, overrides)
+
+    # Tag family keys on parsed campaigns
+    for rec in records:
+        p = rec.parsed
+        if p.discount_code and is_family_key(p.discount_code, families):
+            p.is_family_key = True
 
     # Separate main-table vs excluded
     main_buckets = {"OK", "OK_NO_CODE", "OK_NO_ORDERS", "OK_OVERRIDE",
@@ -80,16 +88,24 @@ def main():
 
     # Collect unique (code, send_date, window) combinations
     attribution_tasks = []
+    family_tasks = []
     for rec in main_records:
         p = rec.parsed
         if p.discount_code:
-            attribution_tasks.append((
-                p.discount_code,
-                p.parsed_send_date,
-                p.attribution_window_days,
-            ))
+            if p.is_family_key:
+                family_tasks.append((
+                    p.discount_code,
+                    p.parsed_send_date,
+                    p.attribution_window_days,
+                ))
+            else:
+                attribution_tasks.append((
+                    p.discount_code,
+                    p.parsed_send_date,
+                    p.attribution_window_days,
+                ))
 
-    # Deduplicate by code+date (in case same code appears in multiple campaigns)
+    # Standard code attribution
     seen = set()
     for code, send_date, window in attribution_tasks:
         key = f"{code.lower()}|{send_date}|{window}"
@@ -98,13 +114,30 @@ def main():
         seen.add(key)
         print(f"  Attributing: {code} (window: {send_date} + {window}d)...")
         attr = compute_attribution(shopify_auth, code, send_date, window)
-        # Store by lowercase code (may overwrite if same code, different date —
-        # per plan, attribute to most recent send_date)
         code_lower = code.lower()
         if code_lower not in attributions or (
             send_date and send_date > (attributions[code_lower]._send_date if hasattr(attributions[code_lower], '_send_date') else date.min)
         ):
-            attr._send_date = send_date  # type: ignore  # attach for comparison
+            attr._send_date = send_date  # type: ignore
+            attributions[code_lower] = attr
+
+    # Family / multi-code attribution
+    for family_key, send_date, window in family_tasks:
+        key = f"{family_key.lower()}|{send_date}|{window}"
+        if key in seen:
+            continue
+        seen.add(key)
+        members = get_family_identifiers(family_key, families)
+        title_ids = [m.identifier for m in members]
+        print(f"  Attributing family: {family_key} -> {title_ids} (window: {send_date} + {window}d)...")
+        attr = compute_family_attribution(
+            shopify_auth, family_key, title_ids, send_date, window,
+        )
+        code_lower = family_key.lower()
+        if code_lower not in attributions or (
+            send_date and send_date > (attributions[code_lower]._send_date if hasattr(attributions[code_lower], '_send_date') else date.min)
+        ):
+            attr._send_date = send_date  # type: ignore
             attributions[code_lower] = attr
 
     print(f"  Attribution computed for {len(attributions)} discount code(s)")
@@ -142,6 +175,11 @@ def main():
         for r in records
         if r.parsed.discount_code and r.parsed.qa_bucket in main_buckets
     }
+    # Add family member identifiers so they don't show as unmatched
+    for fkey, members in families.items():
+        if fkey.lower() in campaign_codes:
+            for m in members:
+                campaign_codes.add(m.identifier.lower())
     unmatched_df = generate_unmatched_codes_report(shopify_code_map, campaign_codes)
 
     qa_summary = generate_qa_summary(records, dashboard_rows, unmatched_df)

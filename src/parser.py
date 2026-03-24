@@ -27,6 +27,7 @@ class ParsedCampaign:
     offer_value: str | None = None
     discount_code: str | None = None          # None means Code = "None" or unparseable
     is_bin_holiday: bool = False
+    is_family_key: bool = False               # True if discount_code is a family key
     attribution_window_days: int = DEFAULT_ATTRIBUTION_WINDOW_DAYS
     attribution_window_end: date | None = None
     qa_bucket: str = "PARSE_ERROR"

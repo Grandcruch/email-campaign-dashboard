@@ -25,7 +25,8 @@ from src.config import load_env, DATA_START_DATE, OUTPUT_DIR
 from src.auth import ShopifyAuth, hubspot_headers
 from src.hubspot import fetch_campaigns
 from src.overrides import load_overrides, apply_overrides
-from src.shopify_orders import compute_attribution, fetch_all_discount_codes_in_range
+from src.shopify_orders import compute_attribution, compute_family_attribution, fetch_all_discount_codes_in_range
+from src.families import load_family_mapping, is_family_key, get_family_identifiers
 from src.reports import (
     assemble_dashboard_rows,
     rows_to_dataframe,
@@ -616,14 +617,21 @@ def run_pipeline() -> dict:
             client_secret=env["SHOPIFY_CLIENT_SECRET"],
         )
 
-        # Step 2: Overrides
+        # Step 2: Overrides + family mappings
         status.update(label="Loading campaign overrides...")
         overrides = load_overrides()
+        families = load_family_mapping()
 
         # Step 3: HubSpot campaigns
         status.update(label="Fetching HubSpot campaigns...")
         records = fetch_campaigns(hubspot_token)
         apply_overrides(records, overrides)
+
+        # Tag family keys on parsed campaigns
+        for rec in records:
+            p = rec.parsed
+            if p.discount_code and is_family_key(p.discount_code, families):
+                p.is_family_key = True
 
         main_buckets = {"OK", "OK_NO_CODE", "OK_NO_ORDERS", "OK_OVERRIDE",
                         "DUPLICATE_CODE_WARNING", "WINDOW_OPEN"}
@@ -633,15 +641,25 @@ def run_pipeline() -> dict:
         status.update(label="Computing Shopify attribution...")
         attributions: dict = {}
         attribution_tasks = []
+        family_tasks = []
+
         for rec in main_records:
             p = rec.parsed
             if p.discount_code:
-                attribution_tasks.append((
-                    p.discount_code,
-                    p.parsed_send_date,
-                    p.attribution_window_days,
-                ))
+                if p.is_family_key:
+                    family_tasks.append((
+                        p.discount_code,
+                        p.parsed_send_date,
+                        p.attribution_window_days,
+                    ))
+                else:
+                    attribution_tasks.append((
+                        p.discount_code,
+                        p.parsed_send_date,
+                        p.attribution_window_days,
+                    ))
 
+        # Standard code attribution
         seen = set()
         for code, send_date, window in attribution_tasks:
             key = f"{code.lower()}|{send_date}|{window}"
@@ -651,6 +669,29 @@ def run_pipeline() -> dict:
             status.update(label=f"Attributing: {code}...")
             attr = compute_attribution(shopify_auth, code, send_date, window)
             code_lower = code.lower()
+            if code_lower not in attributions or (
+                send_date and send_date > (
+                    attributions[code_lower]._send_date
+                    if hasattr(attributions[code_lower], '_send_date')
+                    else date.min
+                )
+            ):
+                attr._send_date = send_date  # type: ignore
+                attributions[code_lower] = attr
+
+        # Family / multi-code attribution
+        for family_key, send_date, window in family_tasks:
+            key = f"{family_key.lower()}|{send_date}|{window}"
+            if key in seen:
+                continue
+            seen.add(key)
+            members = get_family_identifiers(family_key, families)
+            title_ids = [m.identifier for m in members]
+            status.update(label=f"Attributing family: {family_key} ({len(title_ids)} codes)...")
+            attr = compute_family_attribution(
+                shopify_auth, family_key, title_ids, send_date, window,
+            )
+            code_lower = family_key.lower()
             if code_lower not in attributions or (
                 send_date and send_date > (
                     attributions[code_lower]._send_date
@@ -684,6 +725,11 @@ def run_pipeline() -> dict:
             for r in records
             if r.parsed.discount_code and r.parsed.qa_bucket in main_buckets
         }
+        # Also add family member identifiers so they don't show as unmatched
+        for fkey, members in families.items():
+            if fkey.lower() in campaign_codes:
+                for m in members:
+                    campaign_codes.add(m.identifier.lower())
         unmatched_df = generate_unmatched_codes_report(shopify_code_map, campaign_codes)
         qa_summary = generate_qa_summary(records, dashboard_rows, unmatched_df)
 
