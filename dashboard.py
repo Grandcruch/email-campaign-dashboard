@@ -368,7 +368,8 @@ def _generate_analytical_insights(cdf: pd.DataFrame, week_start: date, week_end:
         lines.append(
             f"**Efficiency leader**: {best_eff['Campaign Name']} converted at "
             f"**\\${best_eff['Revenue per Delivered']:.4f}/delivered** with "
-            f"\\${best_eff['Attributed Revenue']:,.2f} total revenue from "
+            f"\\${best_eff['Attributed Revenue']:,.2f} attributed revenue "
+            f"(\\${best_eff['Total Sales']:,.2f} total sales) from "
             f"{int(best_eff['Delivered']):,} deliveries."
         )
 
@@ -376,7 +377,8 @@ def _generate_analytical_insights(cdf: pd.DataFrame, week_start: date, week_end:
         if best_scale['Campaign Name'] != best_eff['Campaign Name']:
             lines.append(
                 f"**Scale leader**: {best_scale['Campaign Name']} generated the highest "
-                f"revenue at **\\${best_scale['Attributed Revenue']:,.2f}** from "
+                f"attributed revenue at **\\${best_scale['Attributed Revenue']:,.2f}** "
+                f"(\\${best_scale['Total Sales']:,.2f} total sales) from "
                 f"{int(best_scale['Delivered']):,} deliveries "
                 f"(\\${best_scale['Revenue per Delivered']:.4f}/delivered)."
             )
@@ -420,7 +422,8 @@ def _generate_analytical_insights(cdf: pd.DataFrame, week_start: date, week_end:
                 for _, r in underperformers.iterrows():
                     lines.append(
                         f"- {r['Campaign Name']}: {int(r['Delivered']):,} delivered "
-                        f"but only \\${r['Attributed Revenue']:,.2f} revenue. "
+                        f"but only \\${r['Attributed Revenue']:,.2f} attributed revenue "
+                        f"(\\${r['Total Sales']:,.2f} total sales). "
                         f"This audience was reached effectively but didn't convert \u2014 "
                         f"consider whether the offer, timing, or product resonated."
                     )
@@ -435,8 +438,9 @@ def _generate_analytical_insights(cdf: pd.DataFrame, week_start: date, week_end:
                 for _, r in dark_horses.iterrows():
                     lines.append(
                         f"- {r['Campaign Name']}: only {int(r['Delivered']):,} delivered "
-                        f"but \\${r['Attributed Revenue']:,.2f} revenue "
-                        f"(\\${r['Revenue per Delivered']:.4f}/delivered). "
+                        f"but \\${r['Attributed Revenue']:,.2f} attributed revenue "
+                        f"(\\${r['Total Sales']:,.2f} total sales, "
+                        f"\\${r['Revenue per Delivered']:.4f}/delivered). "
                         f"This campaign punched above its weight \u2014 "
                         f"scaling its delivery could unlock significant upside."
                     )
@@ -447,6 +451,7 @@ def _generate_analytical_insights(cdf: pd.DataFrame, week_start: date, week_end:
 
     prod_group = coded.groupby("Producer / Topic").agg(
         Revenue=("Attributed Revenue", "sum"),
+        TotalSales=("Total Sales", "sum"),
         Delivered=("Delivered", "sum"),
         Campaigns=("Campaign Name", "count"),
     ).reset_index()
@@ -458,7 +463,9 @@ def _generate_analytical_insights(cdf: pd.DataFrame, week_start: date, week_end:
         worst_coded = prod_group[prod_group["Revenue"] > 0]
         lines.append(
             f"**Top producer by scale**: {best_p['Producer / Topic']} "
-            f"(\\${best_p['Revenue']:,.2f} from {int(best_p['Campaigns'])} campaign(s))."
+            f"(\\${best_p['Revenue']:,.2f} attributed revenue, "
+            f"\\${best_p['TotalSales']:,.2f} total sales from "
+            f"{int(best_p['Campaigns'])} campaign(s))."
         )
 
         eff_producers = prod_group[prod_group["Efficiency"].notna() & (prod_group["Delivered"] >= MIN_DELIVERED_THRESHOLD)]
@@ -503,8 +510,10 @@ def _generate_monthly_insights(mdf: pd.DataFrame, all_month_df: pd.DataFrame) ->
         pct = (r["Total_Attributed_Revenue"] / total_rev * 100) if total_rev > 0 else 0
         camp_list = r.get("Campaign_Names", "")
         n_camps = r.get("Campaign_Count", 1)
+        total_sales_val = r.get("Total_Sales", 0) or 0
         lines.append(
-            f"- **{r['Discount Code']}**: \\${r['Total_Attributed_Revenue']:,.2f} "
+            f"- **{r['Discount Code']}**: \\${r['Total_Attributed_Revenue']:,.2f} attributed revenue "
+            f"/ \\${total_sales_val:,.2f} total sales "
             f"({pct:.1f}% of monthly total) from {int(n_camps)} campaign(s)."
         )
         if n_camps > 1:
@@ -551,9 +560,11 @@ def _generate_producer_insights(display_df: pd.DataFrame, view_label: str) -> st
 
     if not coded.empty:
         best = coded.loc[coded["Total_Attributed_Revenue"].idxmax()]
+        best_total_sales = best.get("Total_Sales", 0) or 0
         lines.append(
             f"**Scale leader**: {best['Producer / Topic']} dominates with "
-            f"\\${best['Total_Attributed_Revenue']:,.2f} total attributed revenue "
+            f"\\${best['Total_Attributed_Revenue']:,.2f} attributed revenue "
+            f"(\\${best_total_sales:,.2f} total sales) "
             f"across {int(best['Campaign_Count'])} campaign(s)."
         )
 
@@ -890,7 +901,10 @@ with tab_weekly:
             {"label": "Total Delivered", "value": f"{completed_week_df['Delivered'].sum():,}"},
         ]
         if not coded_week.empty:
-            kpis.append({"label": "Attributed Revenue", "value": f"${coded_week['Attributed Revenue'].sum():,.2f}"})
+            kpis.append({"label": "Attributed Revenue", "value": f"${coded_week['Attributed Revenue'].sum():,.2f}",
+                         "sub": "Discounted items only"})
+            kpis.append({"label": "Total Sales", "value": f"${coded_week['Total Sales'].sum():,.2f}",
+                         "sub": "Full matched orders"})
             kpis.append({"label": "Orders", "value": f"{coded_week['Discounted Orders'].dropna().sum():.0f}"})
         render_kpi_row(kpis)
 
@@ -902,7 +916,7 @@ with tab_weekly:
         if not coded_week.empty:
             metric_choice = st.radio(
                 "Rank by",
-                ["Attributed Revenue", "Revenue per Delivered"],
+                ["Attributed Revenue", "Total Sales", "Revenue per Delivered"],
                 horizontal=True,
                 key="weekly_bar_metric",
                 label_visibility="collapsed",
@@ -911,7 +925,7 @@ with tab_weekly:
             chart_data = coded_week[["Campaign Name", "Discount Code", metric_choice]].copy()
             chart_data = chart_data.sort_values(metric_choice, ascending=True)
 
-            fmt = "$,.2f" if metric_choice == "Attributed Revenue" else "$,.4f"
+            fmt = "$,.4f" if metric_choice == "Revenue per Delivered" else "$,.2f"
 
             bar_chart = alt.Chart(chart_data).mark_bar(
                 color=CLR_WEEKLY,
@@ -936,17 +950,25 @@ with tab_weekly:
         section_title("Delivery vs Revenue", "Each dot represents one campaign")
 
         if not coded_week.empty and len(coded_week) >= 2:
+            scatter_metric = st.radio(
+                "Scatter Y-axis",
+                ["Attributed Revenue", "Total Sales"],
+                horizontal=True,
+                key="weekly_scatter_metric",
+                label_visibility="collapsed",
+            )
+
             scatter_data = coded_week[[
                 "Campaign Name", "Producer / Topic", "Delivered",
-                "Attributed Revenue", "Revenue per Delivered"
+                "Attributed Revenue", "Total Sales", "Revenue per Delivered"
             ]].copy()
 
             med_del = scatter_data["Delivered"].median()
-            med_rev = scatter_data["Attributed Revenue"].median()
+            med_rev = scatter_data[scatter_metric].median()
 
             scatter = alt.Chart(scatter_data).mark_circle(size=120, opacity=0.8).encode(
                 x=alt.X("Delivered:Q", title="Delivered"),
-                y=alt.Y("Attributed Revenue:Q", title="Attributed Revenue"),
+                y=alt.Y(f"{scatter_metric}:Q", title=scatter_metric),
                 color=alt.Color(
                     "Producer / Topic:N",
                     scale=alt.Scale(range=PALETTE_MULTI),
@@ -957,6 +979,7 @@ with tab_weekly:
                     alt.Tooltip("Producer / Topic:N"),
                     alt.Tooltip("Delivered:Q", format=","),
                     alt.Tooltip("Attributed Revenue:Q", format="$,.2f"),
+                    alt.Tooltip("Total Sales:Q", format="$,.2f"),
                     alt.Tooltip("Revenue per Delivered:Q", format="$,.4f"),
                 ],
             )
@@ -973,8 +996,8 @@ with tab_weekly:
             # Quadrant text annotations
             max_del = scatter_data["Delivered"].max()
             min_del = scatter_data["Delivered"].min()
-            max_rev = scatter_data["Attributed Revenue"].max()
-            min_rev = scatter_data["Attributed Revenue"].min()
+            max_rev = scatter_data[scatter_metric].max()
+            min_rev = scatter_data[scatter_metric].min()
             range_del = max_del - min_del if max_del != min_del else 1
             range_rev = max_rev - min_rev if max_rev != min_rev else 1
 
@@ -1011,7 +1034,7 @@ with tab_weekly:
         display_cols = [
             "Parsed Send Date", "Discount Code", "Campaign Name",
             "Discounted Orders", "Delivered", "Attributed Revenue",
-            "Revenue per Delivered",
+            "Total Sales", "Revenue per Delivered",
         ]
         available = [c for c in display_cols if c in completed_week_df.columns]
         st.dataframe(
@@ -1020,7 +1043,8 @@ with tab_weekly:
                 "Parsed Send Date": st.column_config.DateColumn("Send Date", width="small"),
                 "Campaign Name": st.column_config.TextColumn("Campaign", width="large"),
                 "Discount Code": st.column_config.TextColumn("Code", width="medium"),
-                "Attributed Revenue": st.column_config.NumberColumn("Revenue", format="$%.2f"),
+                "Attributed Revenue": st.column_config.NumberColumn("Attr. Revenue", format="$%.2f"),
+                "Total Sales": st.column_config.NumberColumn("Total Sales", format="$%.2f"),
                 "Revenue per Delivered": st.column_config.NumberColumn("Rev/Delivered", format="$%.4f"),
             },
             use_container_width=True,
@@ -1064,9 +1088,11 @@ with tab_monthly:
     else:
         # ── KPI Row ──────────────────────────────────────────────────────
         total_rev = monthly_df["Total_Attributed_Revenue"].sum() if not monthly_df.empty else 0
+        total_sales = monthly_df["Total_Sales"].sum() if (not monthly_df.empty and "Total_Sales" in monthly_df.columns) else 0
         total_orders = monthly_df["Total_Discounted_Orders"].sum() if not monthly_df.empty else 0
         render_kpi_row([
-            {"label": "Total Revenue", "value": f"${total_rev:,.2f}"},
+            {"label": "Attributed Revenue", "value": f"${total_rev:,.2f}", "sub": "Discounted items only"},
+            {"label": "Total Sales", "value": f"${total_sales:,.2f}", "sub": "Full matched orders"},
             {"label": "Total Orders", "value": f"{total_orders:.0f}"},
             {"label": "Discount Codes", "value": str(len(monthly_df) if not monthly_df.empty else 0)},
         ])
@@ -1083,8 +1109,8 @@ with tab_monthly:
             )
 
             weekly_agg = all_month.groupby("Week_Start").agg(
-                Total_Revenue=("Attributed Revenue", "sum"),
-                Avg_Revenue=("Attributed Revenue", "mean"),
+                Attributed_Revenue=("Attributed Revenue", "sum"),
+                Total_Sales=("Total Sales", "sum"),
                 Campaign_Count=("Campaign Name", "count"),
             ).reset_index().sort_values("Week_Start")
 
@@ -1093,25 +1119,26 @@ with tab_monthly:
             )
 
             bars = base.mark_bar(color=CLR_MONTHLY, opacity=0.7, cornerRadiusEnd=3).encode(
-                y=alt.Y("Total_Revenue:Q", title="Total Attributed Revenue"),
+                y=alt.Y("Total_Sales:Q", title="Total Sales"),
                 tooltip=[
                     alt.Tooltip("Week_Start:N", title="Week of"),
-                    alt.Tooltip("Total_Revenue:Q", format="$,.2f", title="Total Revenue"),
+                    alt.Tooltip("Total_Sales:Q", format="$,.2f", title="Total Sales"),
+                    alt.Tooltip("Attributed_Revenue:Q", format="$,.2f", title="Attributed Revenue"),
                     alt.Tooltip("Campaign_Count:Q", title="Campaigns"),
                 ],
             )
 
             line = base.mark_line(color=CLR_MONTHLY_LINE, strokeWidth=3, point=True).encode(
-                y=alt.Y("Avg_Revenue:Q", title="Avg Campaign Revenue"),
+                y=alt.Y("Attributed_Revenue:Q", title="Attributed Revenue"),
                 tooltip=[
-                    alt.Tooltip("Avg_Revenue:Q", format="$,.2f", title="Avg Revenue/Campaign"),
+                    alt.Tooltip("Attributed_Revenue:Q", format="$,.2f", title="Attributed Revenue"),
                 ],
             )
 
             combo = alt.layer(bars, line).resolve_scale(y="independent").properties(height=350)
             st.altair_chart(styled_chart(combo), use_container_width=True)
             st.caption(
-                f"Bars = total weekly revenue \u00b7 Line = average revenue per campaign"
+                f"Bars = total sales (full orders) \u00b7 Line = attributed revenue (discounted items only)"
             )
         else:
             st.info("No weekly data to chart.")
@@ -1186,7 +1213,10 @@ with tab_monthly:
                 monthly_df,
                 column_config={
                     "Total_Attributed_Revenue": st.column_config.NumberColumn(
-                        "Total Revenue", format="$%.2f"
+                        "Attr. Revenue", format="$%.2f"
+                    ),
+                    "Total_Sales": st.column_config.NumberColumn(
+                        "Total Sales", format="$%.2f"
                     ),
                     "Total_Discount_Value": st.column_config.NumberColumn(
                         "Discount Value", format="$%.2f"
@@ -1235,8 +1265,12 @@ with tab_producer:
         display_df = prod_df.drop(columns=["View"], errors="ignore")
 
         # ── KPI Row ──────────────────────────────────────────────────────
+        prod_total_sales = display_df['Total_Sales'].sum() if 'Total_Sales' in display_df.columns else 0
         render_kpi_row([
-            {"label": "Total Revenue", "value": f"${display_df['Total_Attributed_Revenue'].sum():,.2f}"},
+            {"label": "Attributed Revenue", "value": f"${display_df['Total_Attributed_Revenue'].sum():,.2f}",
+             "sub": "Discounted items only"},
+            {"label": "Total Sales", "value": f"${prod_total_sales:,.2f}",
+             "sub": "Full matched orders"},
             {"label": "Producers", "value": str(len(display_df))},
             {"label": "Total Campaigns", "value": f"{display_df['Campaign_Count'].sum():.0f}"},
         ])
@@ -1248,9 +1282,10 @@ with tab_producer:
 
         prod_metric = st.radio(
             "Rank by",
-            ["Total_Attributed_Revenue", "Revenue per Delivered", "Total_Discounted_Orders"],
+            ["Total_Attributed_Revenue", "Total_Sales", "Revenue per Delivered", "Total_Discounted_Orders"],
             format_func=lambda x: {
                 "Total_Attributed_Revenue": "Attributed Revenue",
+                "Total_Sales": "Total Sales",
                 "Revenue per Delivered": "Revenue per Delivered",
                 "Total_Discounted_Orders": "Discounted Orders",
             }.get(x, x),
@@ -1265,7 +1300,7 @@ with tab_producer:
 
         if prod_metric == "Revenue per Delivered":
             fmt = "$,.4f"
-        elif prod_metric == "Total_Attributed_Revenue":
+        elif prod_metric in ("Total_Attributed_Revenue", "Total_Sales"):
             fmt = "$,.2f"
         else:
             fmt = ",.0f"
@@ -1298,7 +1333,10 @@ with tab_producer:
             display_df,
             column_config={
                 "Total_Attributed_Revenue": st.column_config.NumberColumn(
-                    "Total Revenue", format="$%.2f"
+                    "Attr. Revenue", format="$%.2f"
+                ),
+                "Total_Sales": st.column_config.NumberColumn(
+                    "Total Sales", format="$%.2f"
                 ),
                 "Revenue per Delivered": st.column_config.NumberColumn(
                     "Rev/Delivered", format="$%.4f"

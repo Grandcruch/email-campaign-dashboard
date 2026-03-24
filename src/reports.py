@@ -156,7 +156,7 @@ def rows_to_dataframe(rows: list[DashboardRow]) -> pd.DataFrame:
             "Clicked": r.clicked,
             "Attributed Revenue": r.attributed_revenue,
             "Discount Value": r.discount_value,
-            "Total Order Value": r.total_order_value,
+            "Total Sales": r.total_order_value,
             "Discounted Orders": r.discounted_orders,
             "Revenue per Delivered": r.revenue_per_delivered,
             "Attribution Window Days": r.attribution_window_days,
@@ -184,7 +184,7 @@ def generate_weekly_report(df: pd.DataFrame, run_date: date) -> pd.DataFrame:
     cols = [
         "Parsed Send Date", "Discount Code", "Campaign Name",
         "Discounted Orders", "Delivered", "Attributed Revenue",
-        "Revenue per Delivered",
+        "Total Sales", "Revenue per Delivered",
     ]
     available = [c for c in cols if c in df.columns]
     weekly = df[available].copy()
@@ -416,6 +416,7 @@ def generate_monthly_report(df: pd.DataFrame, year: int, month: int) -> pd.DataF
         Campaign_Count=("Campaign Name", "count"),
         Campaign_Names=("Campaign Name", lambda x: " | ".join(x)),
         Total_Attributed_Revenue=("Attributed Revenue", "sum"),
+        Total_Sales=("Total Sales", "sum"),
         Total_Discounted_Orders=("Discounted Orders", "sum"),
         Total_Discount_Value=("Discount Value", "sum"),
         Total_Delivered=("Delivered", "sum"),
@@ -444,6 +445,7 @@ def _build_producer_grouped(source_df: pd.DataFrame) -> pd.DataFrame:
     grouped = source_df.groupby("Producer / Topic").agg(
         Campaign_Count=("Campaign Name", "count"),
         Total_Attributed_Revenue=("Attributed Revenue", "sum"),
+        Total_Sales=("Total Sales", "sum"),
         Total_Discounted_Orders=("Discounted Orders", "sum"),
         Total_Delivered=("Delivered", "sum"),
     ).reset_index()
@@ -585,7 +587,7 @@ HISTORY_COLUMNS = [
     "Parsed Send Date", "Discount Code", "Campaign Name",
     "Producer / Topic", "Campaign Type", "Offer Value",
     "Attribution Window Days", "Delivered", "Opened", "Clicked",
-    "Attributed Revenue", "Discount Value", "Total Order Value",
+    "Attributed Revenue", "Discount Value", "Total Sales",
     "Discounted Orders", "Revenue per Delivered",
     "is_final_snapshot", "Run Date", "Attribution Window End",
     "QA Bucket", "HubSpot v3 Email ID", "HubSpot v1 Campaign ID",
