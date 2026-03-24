@@ -46,7 +46,7 @@ from src.reports import (
 
 # Color tokens — Red scale palette
 # Full scale: "#fef2f2","#fee2e2","#fecaca","#fca5a5","#f87171","#ef4444","#dc2626","#b91c1c","#991b1b","#7f1d1d","#450a0a"
-CLR_BG_PAGE = "#fef2f2"         # Lightest red — page background
+CLR_BG_PAGE = "#ffffff"         # White — page background
 CLR_SURFACE = "#ffffff"
 CLR_BORDER = "#fecaca"          # Light red border
 CLR_ACCENT = "#b91c1c"          # Deep red — brand accent
