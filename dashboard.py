@@ -723,6 +723,63 @@ st.set_page_config(
 st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
 
 
+# ─── Password Gate ───────────────────────────────────────────────────────────
+
+def _check_password() -> bool:
+    """Show a login form and return True only if the correct password is entered."""
+    if st.session_state.get("authenticated"):
+        return True
+
+    # Retrieve password from Streamlit secrets (cloud) or .env.txt fallback
+    try:
+        correct_pw = st.secrets["DASHBOARD_PASSWORD"]
+    except Exception:
+        # Fallback: read from .env.txt
+        correct_pw = None
+        env_path = os.path.join(PROJECT_ROOT, ".env.txt")
+        if os.path.isfile(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("DASHBOARD_PASSWORD"):
+                        if "=" in line:
+                            correct_pw = line.split("=", 1)[1].strip()
+                        elif ":" in line:
+                            correct_pw = line.split(":", 1)[1].strip()
+
+    if not correct_pw:
+        # No password configured — skip gate (local dev without password set)
+        return True
+
+    # ── Login UI ──
+    st.markdown(f"""
+    <div style="max-width: 400px; margin: 8rem auto; text-align: center;">
+        <div style="font-size: 1.5rem; font-weight: 700; color: {CLR_TEXT_PRIMARY}; margin-bottom: 0.25rem;">
+            Grand Cru Liquid Assets
+        </div>
+        <div style="font-size: 0.85rem; color: {CLR_TEXT_MUTED}; margin-bottom: 2rem;">
+            Campaign Performance Dashboard
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        password = st.text_input("Password", type="password", placeholder="Enter dashboard password")
+        if st.button("Sign in", type="primary", use_container_width=True):
+            if password == correct_pw:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+    st.stop()
+    return False
+
+
+if not _check_password():
+    st.stop()
+
+
 # ─── Load data ───────────────────────────────────────────────────────────────
 
 if "data" not in st.session_state:
