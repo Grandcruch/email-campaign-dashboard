@@ -51,6 +51,7 @@ class DashboardRow:
     revenue_per_delivered: float | None = None
     # Metadata
     is_final_snapshot: bool = False
+    is_family_key: bool = False
     qa_bucket: str = ""
     run_date: date | None = None
     hubspot_v3_email_id: str = ""
@@ -91,6 +92,7 @@ def assemble_dashboard_rows(
             hubspot_v1_campaign_id=rec.hubspot_v1_campaign_id,
             run_date=run_date,
             qa_bucket=p.qa_bucket,
+            is_family_key=p.is_family_key,
         )
 
         # is_final_snapshot
@@ -167,6 +169,7 @@ def rows_to_dataframe(rows: list[DashboardRow]) -> pd.DataFrame:
             "Attribution Window Days": r.attribution_window_days,
             "Attribution Window End": r.attribution_window_end,
             "is_final_snapshot": r.is_final_snapshot,
+            "is_family_key": r.is_family_key,
             "QA Bucket": r.qa_bucket,
             "Run Date": r.run_date,
             "HubSpot v3 Email ID": r.hubspot_v3_email_id,
@@ -177,6 +180,107 @@ def rows_to_dataframe(rows: list[DashboardRow]) -> pd.DataFrame:
         df.sort_values(["Parsed Send Date", "Campaign Name"], ascending=[False, True], inplace=True)
         df.reset_index(drop=True, inplace=True)
     return df
+
+
+# ─── BIN Sale grouping ────────────────────────────────────────────────────────
+
+def apply_bin_grouping(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Combine BIN Sale + BIN Sale Reminder rows that share the same discount
+    family into a single reporting row.
+
+    Grouping key: (Discount Code, send_week_monday) where is_family_key=True.
+
+    For HubSpot metrics (Delivered, Opened, Clicked): SUM across group.
+    For Shopify metrics (Attributed Revenue, Total Sales, etc.): take the
+    values from the row with the latest Attribution Window End to avoid
+    double-counting from overlapping attribution windows.
+    Revenue per Delivered is recomputed from combined values.
+
+    Non-family rows pass through unchanged.
+    """
+    if df.empty:
+        return df.copy()
+
+    # If no is_family_key column or no family rows, return as-is
+    if "is_family_key" not in df.columns:
+        return df.copy()
+
+    family_mask = df["is_family_key"] == True
+    if not family_mask.any():
+        return df.copy()
+
+    non_family = df[~family_mask].copy()
+    family = df[family_mask].copy()
+
+    grouped_rows = []
+    for code, grp in family.groupby("Discount Code"):
+        if len(grp) == 1:
+            # Single row — no grouping needed, pass through
+            grouped_rows.append(grp.iloc[0].to_dict())
+            continue
+
+        # Sum HubSpot delivery metrics
+        total_delivered = grp["Delivered"].sum()
+        total_opened = grp["Opened"].sum()
+        total_clicked = grp["Clicked"].sum()
+
+        # Sum Shopify metrics across all rows in the group.
+        # Each campaign has its own attribution window and its own separate
+        # Shopify API call, so order sets do not overlap.
+        rev_rows = grp[grp["Attributed Revenue"].notna()].copy()
+        if not rev_rows.empty:
+            attr_rev = rev_rows["Attributed Revenue"].sum()
+            total_sales = rev_rows["Total Sales"].sum()
+            discount_val = rev_rows["Discount Value"].sum()
+            disc_orders = rev_rows["Discounted Orders"].sum()
+        else:
+            attr_rev = None
+            total_sales = None
+            discount_val = None
+            disc_orders = None
+
+        # Recompute efficiency
+        rpd = None
+        if attr_rev is not None and total_delivered > 0:
+            rpd = round(attr_rev / total_delivered, 4)
+
+        # Build combined row from the first row as template
+        combined = grp.iloc[0].to_dict()
+        campaign_names = sorted(grp["Campaign Name"].unique())
+        earliest_date = grp["Parsed Send Date"].min()
+
+        combined["Campaign Name"] = f"{earliest_date} BIN Sale Group ({code})"
+        combined["Parsed Send Date"] = earliest_date
+        combined["Delivered"] = total_delivered
+        combined["Opened"] = total_opened
+        combined["Clicked"] = total_clicked
+        combined["Attributed Revenue"] = attr_rev
+        combined["Total Sales"] = total_sales
+        combined["Discount Value"] = discount_val
+        combined["Discounted Orders"] = disc_orders
+        combined["Revenue per Delivered"] = rpd
+        combined["Attribution Window End"] = grp["Attribution Window End"].max()
+        combined["is_final_snapshot"] = grp["is_final_snapshot"].all()
+        combined["_grouped_from"] = " | ".join(campaign_names)
+
+        grouped_rows.append(combined)
+
+    if grouped_rows:
+        grouped_df = pd.DataFrame(grouped_rows)
+        # Drop temp columns
+        for col in ["_send_dt", "_week_monday", "_awe"]:
+            if col in grouped_df.columns:
+                grouped_df.drop(columns=[col], inplace=True)
+        result = pd.concat([non_family, grouped_df], ignore_index=True)
+    else:
+        result = non_family.copy()
+
+    if not result.empty:
+        result.sort_values(["Parsed Send Date", "Campaign Name"], ascending=[False, True], inplace=True)
+        result.reset_index(drop=True, inplace=True)
+
+    return result
 
 
 # ─── Weekly report ───────────────────────────────────────────────────────────
