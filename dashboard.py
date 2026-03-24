@@ -44,24 +44,25 @@ from src.reports import (
 
 # ─── Design System ──────────────────────────────────────────────────────────
 
-# Color tokens
-CLR_BG_PAGE = "#f8f9fb"
+# Color tokens — Red scale palette
+# Full scale: "#fef2f2","#fee2e2","#fecaca","#fca5a5","#f87171","#ef4444","#dc2626","#b91c1c","#991b1b","#7f1d1d","#450a0a"
+CLR_BG_PAGE = "#fef2f2"         # Lightest red — page background
 CLR_SURFACE = "#ffffff"
-CLR_BORDER = "#e2e5ea"
-CLR_ACCENT = "#722f37"          # Burgundy — brand accent
-CLR_WEEKLY = "#2c3e50"          # Wine navy — Weekly charts
-CLR_MONTHLY = "#b8860b"         # Muted gold — Monthly charts
-CLR_MONTHLY_LINE = "#722f37"    # Burgundy — Monthly combo line
-CLR_PRODUCER = "#6b4c6e"        # Slate plum — Producer charts
-CLR_TEAL = "#3d7a80"            # Teal — scatter secondary
-CLR_TEXT_PRIMARY = "#1a1d23"
-CLR_TEXT_SECONDARY = "#5a6170"
-CLR_TEXT_MUTED = "#8c919a"
-CLR_POSITIVE = "#2d7d5f"
-CLR_NEGATIVE = "#c0392b"
+CLR_BORDER = "#fecaca"          # Light red border
+CLR_ACCENT = "#b91c1c"          # Deep red — brand accent
+CLR_WEEKLY = "#991b1b"          # Dark red — Weekly charts
+CLR_MONTHLY = "#dc2626"         # Medium red — Monthly charts
+CLR_MONTHLY_LINE = "#7f1d1d"    # Very dark red — Monthly combo line
+CLR_PRODUCER = "#450a0a"        # Darkest red — Producer charts
+CLR_TEAL = "#ef4444"            # Bright red — scatter secondary
+CLR_TEXT_PRIMARY = "#450a0a"    # Darkest red — primary text
+CLR_TEXT_SECONDARY = "#7f1d1d"  # Dark red — secondary text
+CLR_TEXT_MUTED = "#fca5a5"      # Soft red — muted text
+CLR_POSITIVE = "#991b1b"        # Dark red — positive indicator
+CLR_NEGATIVE = "#ef4444"        # Bright red — negative indicator
 
-# Multi-series palette
-PALETTE_MULTI = [CLR_WEEKLY, CLR_TEAL, CLR_PRODUCER, CLR_MONTHLY, "#8fa3bf"]
+# Multi-series palette (dark to light for visual distinction)
+PALETTE_MULTI = ["#450a0a", "#991b1b", "#dc2626", "#f87171", "#fca5a5"]
 
 GLOBAL_CSS = f"""
 <style>
