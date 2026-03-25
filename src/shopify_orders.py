@@ -24,6 +24,7 @@ class OrderAttribution:
     attributed_revenue: float = 0.0      # net sales of discounted items (price × qty − discount)
     discount_value: float = 0.0          # dollar discount on those items
     order_total_price: float = 0.0       # full order total_price
+    order_subtotal: float = 0.0          # current_subtotal_price — merchandise net of discounts, excl tax/shipping
     discounted_line_items: int = 0
     total_line_items: int = 0
     financial_status: str = ""
@@ -37,6 +38,7 @@ class CampaignAttribution:
     attributed_revenue: float = 0.0
     discount_value: float = 0.0
     total_order_value: float = 0.0
+    total_order_subtotal: float = 0.0   # sum of current_subtotal_price across matched orders
     discounted_orders: int = 0
     matched_orders: list[OrderAttribution] = field(default_factory=list)
 
@@ -96,11 +98,19 @@ def _attribute_order(order: dict, campaign_code: str) -> OrderAttribution | None
             campaign_app_index = i
             break
 
+    # current_subtotal_price = merchandise total net of discounts, excl tax/shipping
+    # Prefer current_subtotal_price_set.shop_money.amount, fall back to current_subtotal_price
+    _subtotal_set = order.get("current_subtotal_price_set", {}).get("shop_money", {})
+    _subtotal = float(_subtotal_set.get("amount", 0)) if _subtotal_set else 0.0
+    if not _subtotal:
+        _subtotal = float(order.get("current_subtotal_price", 0))
+
     attr = OrderAttribution(
         order_id=order.get("id", 0),
         order_name=order.get("name", ""),
         order_created_at=order.get("created_at", ""),
         order_total_price=float(order.get("total_price", 0)),
+        order_subtotal=_subtotal,
         financial_status=order.get("financial_status", ""),
         matched_identifier=campaign_code,
     )
@@ -166,11 +176,18 @@ def _attribute_order_by_title(
     if not matched_app_indices:
         return None
 
+    # current_subtotal_price = merchandise total net of discounts, excl tax/shipping
+    _subtotal_set = order.get("current_subtotal_price_set", {}).get("shop_money", {})
+    _subtotal = float(_subtotal_set.get("amount", 0)) if _subtotal_set else 0.0
+    if not _subtotal:
+        _subtotal = float(order.get("current_subtotal_price", 0))
+
     attr = OrderAttribution(
         order_id=order.get("id", 0),
         order_name=order.get("name", ""),
         order_created_at=order.get("created_at", ""),
         order_total_price=float(order.get("total_price", 0)),
+        order_subtotal=_subtotal,
         financial_status=order.get("financial_status", ""),
         matched_identifier=matched_title,
     )
@@ -215,6 +232,7 @@ def compute_attribution(
         result.attributed_revenue += attr.attributed_revenue
         result.discount_value += attr.discount_value
         result.total_order_value += attr.order_total_price
+        result.total_order_subtotal += attr.order_subtotal
         result.discounted_orders += 1
         result.matched_orders.append(attr)
 
@@ -274,6 +292,7 @@ def compute_family_attribution(
         result.attributed_revenue += attr.attributed_revenue
         result.discount_value += attr.discount_value
         result.total_order_value += attr.order_total_price
+        result.total_order_subtotal += attr.order_subtotal
         result.discounted_orders += 1
         result.matched_orders.append(attr)
 

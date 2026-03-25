@@ -28,6 +28,8 @@ class CampaignRecord:
     sent: int = 0
     bounced: int = 0
     unsubscribed: int = 0
+    # Email content metadata
+    subject: str = ""
 
 
 def _fetch_v3_emails(token: str) -> list[dict]:
@@ -117,6 +119,7 @@ def fetch_campaigns(token: str) -> list[CampaignRecord]:
         record = CampaignRecord(
             parsed=parsed,
             hubspot_v3_email_id=str(email.get("id", "")),
+            subject=email.get("subject", ""),
         )
 
         # If parse failed (LEGACY_FORMAT, PARSE_ERROR), still add to records for QA

@@ -43,10 +43,12 @@ class DashboardRow:
     delivered: int = 0
     opened: int = 0
     clicked: int = 0
+    subject: str = ""
     # Shopify — None means "not applicable" (null)
     attributed_revenue: float | None = None
     discount_value: float | None = None
     total_order_value: float | None = None
+    total_order_subtotal: float | None = None  # current_subtotal_price sum (merch net of discounts, excl tax/shipping)
     discounted_orders: int | None = None
     revenue_per_delivered: float | None = None
     # Metadata
@@ -88,6 +90,7 @@ def assemble_dashboard_rows(
             delivered=rec.delivered,
             opened=rec.opened,
             clicked=rec.clicked,
+            subject=rec.subject,
             hubspot_v3_email_id=rec.hubspot_v3_email_id,
             hubspot_v1_campaign_id=rec.hubspot_v1_campaign_id,
             run_date=run_date,
@@ -105,6 +108,7 @@ def assemble_dashboard_rows(
             row.attributed_revenue = None
             row.discount_value = None
             row.total_order_value = None
+            row.total_order_subtotal = None
             row.discounted_orders = None
             row.revenue_per_delivered = None
         else:
@@ -119,6 +123,7 @@ def assemble_dashboard_rows(
                 row.attributed_revenue = round(attr.attributed_revenue, 2)
                 row.discount_value = round(attr.discount_value, 2)
                 row.total_order_value = round(attr.total_order_value, 2)
+                row.total_order_subtotal = round(attr.total_order_subtotal, 2)
                 row.discounted_orders = attr.discounted_orders
                 if rec.delivered > 0:
                     row.revenue_per_delivered = round(attr.attributed_revenue / rec.delivered, 4)
@@ -129,6 +134,7 @@ def assemble_dashboard_rows(
                 row.attributed_revenue = 0.0
                 row.discount_value = 0.0
                 row.total_order_value = 0.0
+                row.total_order_subtotal = 0.0
                 row.discounted_orders = 0
                 row.revenue_per_delivered = 0.0
                 if p.qa_bucket == "OK":
@@ -161,9 +167,11 @@ def rows_to_dataframe(rows: list[DashboardRow]) -> pd.DataFrame:
             "Delivered": r.delivered,
             "Opened": r.opened,
             "Clicked": r.clicked,
+            "Subject": r.subject,
             "Attributed Revenue": r.attributed_revenue,
             "Discount Value": r.discount_value,
             "Total Sales": r.total_order_value,
+            "Order Subtotal": r.total_order_subtotal,
             "Discounted Orders": r.discounted_orders,
             "Revenue per Delivered": r.revenue_per_delivered,
             "Attribution Window Days": r.attribution_window_days,
