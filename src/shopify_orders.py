@@ -21,7 +21,7 @@ class OrderAttribution:
     order_id: int = 0
     order_name: str = ""
     order_created_at: str = ""
-    attributed_revenue: float = 0.0      # gross value of discounted items
+    attributed_revenue: float = 0.0      # net sales of discounted items (price × qty − discount)
     discount_value: float = 0.0          # dollar discount on those items
     order_total_price: float = 0.0       # full order total_price
     discounted_line_items: int = 0
@@ -78,6 +78,10 @@ def _attribute_order(order: dict, campaign_code: str) -> OrderAttribution | None
     Compute line-item level attribution for a single order.
     Matches by discount_codes[].code (standard discount code campaigns).
     Returns None if the campaign code is not found in this order's discount codes.
+
+    attributed_revenue = NET SALES of discounted items:
+        For each matched line item:  price × quantity − discount_allocation amount
+    discount_value = total discount dollar amount on those items
     """
     # Check if the order used this campaign's code
     order_codes = [c.get("code", "").lower() for c in order.get("discount_codes", [])]
@@ -105,21 +109,23 @@ def _attribute_order(order: dict, campaign_code: str) -> OrderAttribution | None
     attr.total_line_items = len(line_items)
 
     if campaign_app_index is not None:
-        # Line-item level attribution
+        # Line-item level attribution — NET SALES (gross minus discount)
         for item in line_items:
             for alloc in item.get("discount_allocations", []):
                 if alloc.get("discount_application_index") == campaign_app_index:
                     item_gross = float(item.get("price", 0)) * int(item.get("quantity", 1))
                     alloc_amount = float(alloc.get("amount", 0))
-                    attr.attributed_revenue += item_gross
+                    attr.attributed_revenue += item_gross - alloc_amount  # net sales
                     attr.discount_value += alloc_amount
                     attr.discounted_line_items += 1
                     break  # only count each item once
     else:
         # Fallback: discount_application entry not found (shouldn't happen, but safe)
-        # Use order-level discount as a proxy
-        attr.attributed_revenue = float(order.get("total_line_items_price", 0))
-        attr.discount_value = float(order.get("total_discounts", 0))
+        # Use order-level net calculation as a proxy
+        gross = float(order.get("total_line_items_price", 0))
+        discounts = float(order.get("total_discounts", 0))
+        attr.attributed_revenue = gross - discounts  # net sales
+        attr.discount_value = discounts
         attr.discounted_line_items = len(line_items)
 
     return attr
@@ -136,6 +142,9 @@ def _attribute_order_by_title(
     discount_codes[].code.  This handles Shopify automatic discounts where
     discount_codes[] is empty and the identifier lives only in
     discount_applications[].title.
+
+    attributed_revenue = NET SALES of discounted items:
+        For each matched line item:  price × quantity − discount_allocation amount
 
     Parameters:
         order: raw Shopify order dict
@@ -170,12 +179,13 @@ def _attribute_order_by_title(
     attr.total_line_items = len(line_items)
 
     # Line-item level attribution across all matched application indices
+    # NET SALES: gross minus discount allocation
     for item in line_items:
         for alloc in item.get("discount_allocations", []):
             if alloc.get("discount_application_index") in matched_app_indices:
                 item_gross = float(item.get("price", 0)) * int(item.get("quantity", 1))
                 alloc_amount = float(alloc.get("amount", 0))
-                attr.attributed_revenue += item_gross
+                attr.attributed_revenue += item_gross - alloc_amount  # net sales
                 attr.discount_value += alloc_amount
                 attr.discounted_line_items += 1
                 break  # only count each item once per discount application

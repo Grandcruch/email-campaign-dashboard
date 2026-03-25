@@ -840,6 +840,27 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+    # ── Metric Definitions ──────────────────────────────────────────────
+    st.markdown(f"""
+    <div style="margin-top: 1.5rem; padding: 0.75rem; background: {CLR_BG_PAGE}; border-radius: 6px; border: 1px solid {CLR_BORDER};">
+        <div style="font-size: 0.7rem; color: {CLR_TEXT_MUTED}; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem;">Metric Definitions</div>
+        <div style="font-size: 0.78rem; color: {CLR_TEXT_SECONDARY}; line-height: 1.65;">
+            <strong style="color:{CLR_TEXT_PRIMARY};">Attributed Revenue</strong><br>
+            Net sales from the item(s) that received the campaign discount (price &times; qty &minus; discount).<br><br>
+            <strong style="color:{CLR_TEXT_PRIMARY};">Total Sales</strong><br>
+            Full order revenue from matched orders, including discounted and non-discounted items.<br><br>
+            <strong style="color:{CLR_TEXT_PRIMARY};">Revenue / Delivered</strong><br>
+            Attributed Revenue &divide; Delivered. Measures net revenue earned per email delivered.<br><br>
+            <strong style="color:{CLR_TEXT_PRIMARY};">Delivered</strong><br>
+            Number of emails successfully delivered (from HubSpot).<br><br>
+            <strong style="color:{CLR_TEXT_PRIMARY};">Discounted Orders</strong><br>
+            Number of Shopify orders that used the campaign discount code within the attribution window.<br><br>
+            <strong style="color:{CLR_TEXT_PRIMARY};">Discount Value</strong><br>
+            Total dollar amount discounted across all matched line items.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
 
 # ─── Tabs ────────────────────────────────────────────────────────────────────
 
@@ -931,7 +952,7 @@ with tab_weekly:
         ]
         if not coded_week.empty:
             kpis.append({"label": "Attributed Revenue", "value": f"${coded_week['Attributed Revenue'].sum():,.2f}",
-                         "sub": "Discounted items only"})
+                         "sub": "Net sales, discounted items"})
             kpis.append({"label": "Total Sales", "value": f"${coded_week['Total Sales'].sum():,.2f}",
                          "sub": "Full matched orders"})
             kpis.append({"label": "Orders", "value": f"{coded_week['Discounted Orders'].dropna().sum():.0f}"})
@@ -1121,7 +1142,7 @@ with tab_monthly:
         total_sales = monthly_df["Total_Sales"].sum() if (not monthly_df.empty and "Total_Sales" in monthly_df.columns) else 0
         total_orders = monthly_df["Total_Discounted_Orders"].sum() if not monthly_df.empty else 0
         render_kpi_row([
-            {"label": "Attributed Revenue", "value": f"${total_rev:,.2f}", "sub": "Discounted items only"},
+            {"label": "Attributed Revenue", "value": f"${total_rev:,.2f}", "sub": "Net sales, discounted items"},
             {"label": "Total Sales", "value": f"${total_sales:,.2f}", "sub": "Full matched orders"},
             {"label": "Total Orders", "value": f"{total_orders:.0f}"},
             {"label": "Discount Codes", "value": str(len(monthly_df) if not monthly_df.empty else 0)},
@@ -1168,7 +1189,7 @@ with tab_monthly:
             combo = alt.layer(bars, line).resolve_scale(y="independent").properties(height=350)
             st.altair_chart(styled_chart(combo), use_container_width=True)
             st.caption(
-                f"Bars = total sales (full orders) \u00b7 Line = attributed revenue (discounted items only)"
+                f"Bars = total sales (full orders) \u00b7 Line = attributed revenue (net sales, discounted items)"
             )
         else:
             st.info("No weekly data to chart.")
@@ -1298,7 +1319,7 @@ with tab_producer:
         prod_total_sales = display_df['Total_Sales'].sum() if 'Total_Sales' in display_df.columns else 0
         render_kpi_row([
             {"label": "Attributed Revenue", "value": f"${display_df['Total_Attributed_Revenue'].sum():,.2f}",
-             "sub": "Discounted items only"},
+             "sub": "Net sales, discounted items"},
             {"label": "Total Sales", "value": f"${prod_total_sales:,.2f}",
              "sub": "Full matched orders"},
             {"label": "Producers", "value": str(len(display_df))},
