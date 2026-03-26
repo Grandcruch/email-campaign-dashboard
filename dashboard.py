@@ -840,6 +840,18 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+    # ── Campaign Filter ─────────────────────────────────────────────────
+    st.markdown(f"""
+    <div style="margin-top: 1.25rem; font-size: 0.7rem; color: {CLR_TEXT_MUTED}; text-transform: uppercase; letter-spacing: 0.05em;">
+        Campaign Filter
+    </div>
+    """, unsafe_allow_html=True)
+    exclude_bin_holiday = st.toggle(
+        "Exclude BIN Sale & Holiday campaigns",
+        value=False,
+        key="exclude_bin_holiday",
+    )
+
     # ── Metric Definitions ──────────────────────────────────────────────
     st.markdown(f"""
     <div style="margin-top: 1.5rem; padding: 0.75rem; background: {CLR_BG_PAGE}; border-radius: 6px; border: 1px solid {CLR_BORDER};">
@@ -861,6 +873,18 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+
+# ─── Apply BIN/Holiday filter ─────────────────────────────────────────────────
+# Keep raw full_df for QA tab; filtered version used by Weekly/Monthly/Producer
+if exclude_bin_holiday:
+    display_df = full_df[full_df["is_bin_holiday"] != True].copy()
+else:
+    display_df = full_df
+
+# Recompute monthly and producer reports from filtered data
+from src.reports import generate_monthly_report, generate_producer_report
+_monthly_df = generate_monthly_report(display_df, run_date.year, run_date.month)
+_producer_current_df, _producer_final_df = generate_producer_report(display_df)
 
 # ─── Tabs ────────────────────────────────────────────────────────────────────
 
@@ -885,7 +909,7 @@ with tab_weekly:
         finalized_only = st.toggle("Finalized only", value=True, key="wk_finalized_toggle")
 
     # Determine date bounds from available data
-    _all_send_dates = pd.to_datetime(full_df["Parsed Send Date"].dropna()).dt.date
+    _all_send_dates = pd.to_datetime(display_df["Parsed Send Date"].dropna()).dt.date
     _min_date = _all_send_dates.min() if not _all_send_dates.empty else DATA_START_DATE
     _max_date = _all_send_dates.max() if not _all_send_dates.empty else run_date
 
@@ -914,11 +938,11 @@ with tab_weekly:
 
         # Filter DataFrame to selected date range
         mask = (
-            full_df["Parsed Send Date"].notna() &
-            (pd.to_datetime(full_df["Parsed Send Date"]).dt.date >= wk_start) &
-            (pd.to_datetime(full_df["Parsed Send Date"]).dt.date <= wk_end)
+            display_df["Parsed Send Date"].notna() &
+            (pd.to_datetime(display_df["Parsed Send Date"]).dt.date >= wk_start) &
+            (pd.to_datetime(display_df["Parsed Send Date"]).dt.date <= wk_end)
         )
-        completed_week_df = full_df[mask].copy()
+        completed_week_df = display_df[mask].copy()
 
         if finalized_only:
             completed_week_df = completed_week_df[
@@ -1115,14 +1139,14 @@ with tab_monthly:
         unsafe_allow_html=True,
     )
 
-    monthly_df = data["monthly_df"]
+    monthly_df = _monthly_df
 
     # Get all finalized campaigns this month for weekly breakdown
-    all_month = full_df[
-        (full_df["Parsed Send Date"].notna()) &
-        (full_df["is_final_snapshot"] == True) &
-        (full_df["Discount Code"] != "None") &
-        (full_df["Attributed Revenue"].notna())
+    all_month = display_df[
+        (display_df["Parsed Send Date"].notna()) &
+        (display_df["is_final_snapshot"] == True) &
+        (display_df["Discount Code"] != "None") &
+        (display_df["Attributed Revenue"].notna())
     ].copy()
     all_month["_send_dt"] = pd.to_datetime(all_month["Parsed Send Date"])
     all_month = all_month[
@@ -1306,24 +1330,24 @@ with tab_producer:
     )
 
     if view == "current-to-date":
-        prod_df = data["producer_current_df"]
+        prod_df = _producer_current_df
     else:
-        prod_df = data["producer_final_df"]
+        prod_df = _producer_final_df
 
     if prod_df.empty:
         st.info(f"No data for the {view} view.")
     else:
-        display_df = prod_df.drop(columns=["View"], errors="ignore")
+        prod_view_df = prod_df.drop(columns=["View"], errors="ignore")
 
         # ── KPI Row ──────────────────────────────────────────────────────
-        prod_total_sales = display_df['Total_Sales'].sum() if 'Total_Sales' in display_df.columns else 0
+        prod_total_sales = prod_view_df['Total_Sales'].sum() if 'Total_Sales' in prod_view_df.columns else 0
         render_kpi_row([
-            {"label": "Attributed Revenue", "value": f"${display_df['Total_Attributed_Revenue'].sum():,.2f}",
+            {"label": "Attributed Revenue", "value": f"${prod_view_df['Total_Attributed_Revenue'].sum():,.2f}",
              "sub": "Net sales, discounted items"},
             {"label": "Total Sales", "value": f"${prod_total_sales:,.2f}",
              "sub": "Full matched orders"},
-            {"label": "Producers", "value": str(len(display_df))},
-            {"label": "Total Campaigns", "value": f"{display_df['Campaign_Count'].sum():.0f}"},
+            {"label": "Producers", "value": str(len(prod_view_df))},
+            {"label": "Total Campaigns", "value": f"{prod_view_df['Campaign_Count'].sum():.0f}"},
         ])
 
         spacer("lg")
@@ -1345,7 +1369,7 @@ with tab_producer:
             label_visibility="collapsed",
         )
 
-        chart_prod = display_df[["Producer / Topic", prod_metric]].copy()
+        chart_prod = prod_view_df[["Producer / Topic", prod_metric]].copy()
         chart_prod = chart_prod[chart_prod[prod_metric].notna()]
         chart_prod = chart_prod.sort_values(prod_metric, ascending=True)
 
@@ -1374,14 +1398,14 @@ with tab_producer:
 
         # ── Producer Insights ────────────────────────────────────────────
         section_title("Producer Insights")
-        render_insight_card(_generate_producer_insights(display_df, view))
+        render_insight_card(_generate_producer_insights(prod_view_df, view))
 
         spacer("lg")
 
         # ── Supporting Detail Table ──────────────────────────────────────
         section_title("Producer Details")
         st.dataframe(
-            display_df,
+            prod_view_df,
             column_config={
                 "Total_Attributed_Revenue": st.column_config.NumberColumn(
                     "Attr. Revenue", format="$%.2f"

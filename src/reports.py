@@ -54,6 +54,7 @@ class DashboardRow:
     # Metadata
     is_final_snapshot: bool = False
     is_family_key: bool = False
+    is_bin_holiday: bool = False
     qa_bucket: str = ""
     run_date: date | None = None
     hubspot_v3_email_id: str = ""
@@ -96,6 +97,7 @@ def assemble_dashboard_rows(
             run_date=run_date,
             qa_bucket=p.qa_bucket,
             is_family_key=p.is_family_key,
+            is_bin_holiday=p.is_bin_holiday,
         )
 
         # is_final_snapshot
@@ -178,6 +180,7 @@ def rows_to_dataframe(rows: list[DashboardRow]) -> pd.DataFrame:
             "Attribution Window End": r.attribution_window_end,
             "is_final_snapshot": r.is_final_snapshot,
             "is_family_key": r.is_family_key,
+            "is_bin_holiday": r.is_bin_holiday,
             "QA Bucket": r.qa_bucket,
             "Run Date": r.run_date,
             "HubSpot v3 Email ID": r.hubspot_v3_email_id,

@@ -12,7 +12,7 @@ OVERRIDES_FILE = os.path.join(PROJECT_ROOT, "campaign_overrides.csv")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 
 # ─── Business constants ──────────────────────────────────────────────────────
-DATA_START_DATE = date(2026, 3, 9)
+DATA_START_DATE = date(2026, 3, 1)
 DEFAULT_ATTRIBUTION_WINDOW_DAYS = 7
 BIN_HOLIDAY_ATTRIBUTION_WINDOW_DAYS = 3
 SHOPIFY_API_VERSION = "2025-01"
