@@ -515,7 +515,7 @@ def _generate_producer_insights(display_df: pd.DataFrame, view_label: str) -> st
         best = coded.loc[coded["Total_Attributed_Revenue"].idxmax()]
         best_total_sales = best.get("Total_Sales", 0) or 0
         lines.append(
-            f"**Scale leader**: {best['Producer / Topic']} dominates with "
+            f"**Scale leader**: {best['Producer']} dominates with "
             f"\\${best['Total_Attributed_Revenue']:,.2f} attributed revenue "
             f"(\\${best_total_sales:,.2f} total sales) "
             f"across {int(best['Campaign_Count'])} campaign(s)."
@@ -525,20 +525,20 @@ def _generate_producer_insights(display_df: pd.DataFrame, view_label: str) -> st
         if len(eff_pool) >= 2:
             best_e = eff_pool.loc[eff_pool["Revenue per Delivered"].idxmax()]
             worst_e = eff_pool.loc[eff_pool["Revenue per Delivered"].idxmin()]
-            if best_e["Producer / Topic"] != best["Producer / Topic"]:
+            if best_e["Producer"] != best["Producer"]:
                 lines.append(
-                    f"**Efficiency leader**: {best_e['Producer / Topic']} achieves the "
+                    f"**Efficiency leader**: {best_e['Producer']} achieves the "
                     f"highest per-email conversion at \\${best_e['Revenue per Delivered']:.4f}/delivered \u2014 "
                     f"scaling delivery for this producer could unlock significant revenue."
                 )
             lines.append(
-                f"**Lowest efficiency**: {worst_e['Producer / Topic']} at "
+                f"**Lowest efficiency**: {worst_e['Producer']} at "
                 f"\\${worst_e['Revenue per Delivered']:.4f}/delivered. "
                 f"Consider testing different subject lines, offers, or audience segments."
             )
 
     if not zero_rev.empty:
-        names = zero_rev["Producer / Topic"].tolist()
+        names = zero_rev["Producer"].tolist()
         lines.append(
             f"**Zero-revenue producers** ({len(names)}): {', '.join(names[:5])}. "
             f"These producers had campaigns sent but no attributed orders \u2014 "
@@ -1132,33 +1132,72 @@ with tab_weekly:
 
 with tab_monthly:
 
+    # ── Month Selector ───────────────────────────────────────────────────
+    # Build the list of selectable months: every month from DATA_START_DATE
+    # through the current run month, newest first. This ensures the user
+    # can always pick any month (even ones with zero finalized campaigns).
+    from dateutil.relativedelta import relativedelta  # local import; keeps top clean
+
+    _floor = pd.Timestamp(DATA_START_DATE).to_pydatetime().date().replace(day=1)
+    _ceiling = run_date.replace(day=1)
+    _month_options: list[tuple[int, int]] = []
+    _cursor = _ceiling
+    while _cursor >= _floor:
+        _month_options.append((_cursor.year, _cursor.month))
+        _cursor = (_cursor - relativedelta(months=1))
+
+    def _fmt_month(ym: tuple[int, int]) -> str:
+        return date(ym[0], ym[1], 1).strftime("%B %Y")
+
+    # Default to the current run month (first option).
+    sel_year, sel_month = st.selectbox(
+        "Month",
+        _month_options,
+        index=0,
+        format_func=_fmt_month,
+        key="monthly_month_picker",
+    )
+
     # ── Scope / Context ──────────────────────────────────────────────────
     st.markdown(
-        f'<div class="context-line">{run_date.strftime("%B %Y")} &middot; '
+        f'<div class="context-line">{_fmt_month((sel_year, sel_month))} &middot; '
         f'Finalized campaigns with closed attribution windows</div>',
         unsafe_allow_html=True,
     )
 
-    monthly_df = _monthly_df
+    # Recompute monthly report for the selected month (not run month).
+    monthly_df = generate_monthly_report(display_df, sel_year, sel_month)
 
-    # Get all finalized campaigns this month for weekly breakdown
+    # Get all finalized campaigns in the selected month for weekly breakdown
     all_month = display_df[
         (display_df["Parsed Send Date"].notna()) &
         (display_df["is_final_snapshot"] == True) &
         (display_df["Discount Code"] != "None") &
         (display_df["Attributed Revenue"].notna())
     ].copy()
-    all_month["_send_dt"] = pd.to_datetime(all_month["Parsed Send Date"])
-    all_month = all_month[
-        (all_month["_send_dt"].dt.year == run_date.year) &
-        (all_month["_send_dt"].dt.month == run_date.month)
-    ]
+    if not all_month.empty:
+        all_month["_send_dt"] = pd.to_datetime(all_month["Parsed Send Date"])
+        all_month = all_month[
+            (all_month["_send_dt"].dt.year == sel_year) &
+            (all_month["_send_dt"].dt.month == sel_month)
+        ]
 
+    _month_is_empty = monthly_df.empty and all_month.empty
 
-    if monthly_df.empty and all_month.empty:
+    # Always render the KPI row — zero values for empty months so the
+    # layout does not disappear when comparing across months.
+    if _month_is_empty:
+        render_kpi_row([
+            {"label": "Attributed Revenue", "value": "$0.00", "sub": "Net sales, discounted items"},
+            {"label": "Total Sales", "value": "$0.00", "sub": "Full matched orders"},
+            {"label": "Total Orders", "value": "0"},
+            {"label": "Discount Codes", "value": "0"},
+        ])
+        spacer("md")
         st.info(
-            "No finalized campaigns for the current month yet. "
-            "Campaigns appear here once their attribution window closes."
+            f"No finalized campaigns in {_fmt_month((sel_year, sel_month))} yet. "
+            "Campaigns appear here once their attribution window closes. "
+            "Pick a different month above to compare."
         )
     else:
         # ── KPI Row ──────────────────────────────────────────────────────
@@ -1369,7 +1408,7 @@ with tab_producer:
             label_visibility="collapsed",
         )
 
-        chart_prod = prod_view_df[["Producer / Topic", prod_metric]].copy()
+        chart_prod = prod_view_df[["Producer", prod_metric]].copy()
         chart_prod = chart_prod[chart_prod[prod_metric].notna()]
         chart_prod = chart_prod.sort_values(prod_metric, ascending=True)
 
@@ -1384,10 +1423,10 @@ with tab_producer:
             color=CLR_PRODUCER,
             cornerRadiusEnd=3,
         ).encode(
-            y=alt.Y("Producer / Topic:N", sort=None, title=None),
+            y=alt.Y("Producer:N", sort=None, title="Discount Code"),
             x=alt.X(f"{prod_metric}:Q", title=prod_metric.replace("_", " ")),
             tooltip=[
-                alt.Tooltip("Producer / Topic:N"),
+                alt.Tooltip("Producer:N", title="Discount Code"),
                 alt.Tooltip(f"{prod_metric}:Q", format=fmt),
             ],
         ).properties(height=max(len(chart_prod) * 35, 200))
@@ -1403,10 +1442,13 @@ with tab_producer:
         spacer("lg")
 
         # ── Supporting Detail Table ──────────────────────────────────────
-        section_title("Producer Details")
+        section_title("Producer Details", "Grouped by discount code")
         st.dataframe(
             prod_view_df,
             column_config={
+                "Producer": st.column_config.TextColumn(
+                    "Discount Code",
+                ),
                 "Total_Attributed_Revenue": st.column_config.NumberColumn(
                     "Attr. Revenue", format="$%.2f"
                 ),

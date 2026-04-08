@@ -1,0 +1,226 @@
+You are in Phase 1 only: Research.
+
+Do not implement code yet unless it is strictly necessary to inspect schemas, validate endpoint responses, or confirm field availability.
+Do not move into planning or execution yet.
+Your job in this phase is to research the data sources, available fields, matching logic feasibility, and potential risks for a repeatable email campaign performance dashboard for Grand Cru Liquid Assets.
+
+=====================
+BUSINESS CONTEXT
+=====================
+
+Grand Cru Liquid Assets sends 5–10 email campaigns per week through HubSpot.
+
+Some email campaigns include:
+- wine offers
+- discount codes
+
+Customers may use these offers and place orders in Shopify.
+In Shopify, we want to analyze performance tied to those offers, including metrics such as:
+- discount code used
+- attributed revenue
+- discounted orders
+- discounted sales
+- total orders
+- total sales
+
+The final project will be a repeatable workflow and dashboard, but for now you are ONLY doing research.
+
+=====================
+API ACCESS
+=====================
+
+API access is already prepared and stored in a local text file named ".env.txt" in the project root.
+
+Use the configured HubSpot and Shopify credentials from that file if needed.
+Do not hardcode secrets into code or repeat them in output.
+
+Expected config variables:
+- HUBSPOT_PRIVATE_APP_TOKEN
+- SHOPIFY_STORE_DOMAIN
+- SHOPIFY_ADMIN_API_TOKEN
+- SHOPIFY_API_VERSION
+
+If any required variable is missing, clearly report which one is missing.
+
+=====================
+CRITICAL BUSINESS RULES
+=====================
+
+1. Standard email campaign discount codes usually expire in 7 days
+2. Bin sale or holiday sale discount codes usually expire in 3 days
+3. The true send date must NOT be taken directly from HubSpot send date fields
+4. Instead, the send date must be parsed from the email campaign name
+5. The discount code must also be parsed from the email campaign name
+6. Email campaign naming convention is expected to follow:
+
+YYYY-MM-DD - Producer/Topic - Campaign Type - Offer Value - Code
+
+Examples:
+- 2026-03-18 - 2010 Cos d'Estournel - PROD - 7% - CosD
+- 2026-03-18 - Kapcsandy - PROD - 10% - KAP10
+- 2026-03-18 - Bordeaux 1995 - EDU - None - None
+- 2026-03-18 - Bordeaux Market - CONTENT - None - None
+
+Definitions:
+- Producer/Topic = Producer name (and vintage if applicable) or email topic
+- Campaign Type:
+  - PROD = product-first, sales-focused
+  - EDU = educational but leads to shoppable pages
+  - CONTENT = educational, links to blog only
+- Offer Value = Discount value such as 5%, 7%, 10%, or “None”
+- Code = Discount code or “None”
+
+=====================
+WHAT THE FINAL DASHBOARD WILL NEED
+=====================
+
+Later, the dashboard should show, per campaign:
+
+- Campaign Name
+- Parsed Send Date
+- Producer / Topic
+- Campaign Type
+- Offer Value
+- Discount Code
+- Delivered
+- Attributed Revenue
+- Discounted Revenue
+- Discounted Orders
+- Discounted Sales
+- Total Orders
+- Total Sales
+- $/Delivered = Attributed Revenue / Delivered
+
+There also needs to be a cumulative campaign history table so weekly campaign data can be stored over time for quarterly and yearly analysis.
+
+But again: in this phase, only research feasibility and data structure.
+
+=====================
+YOUR PHASE 1 TASKS
+=====================
+
+Research and determine the following:
+
+1. HubSpot side
+- Which HubSpot API endpoints, objects, and properties are needed to retrieve email campaign data
+- Which field is the best source for campaign name
+- Which field is the best source for delivered count
+- Whether other email performance fields relevant to this project are available
+- Whether campaign records can be reliably filtered for the current week
+
+2. Shopify side
+- Which Shopify API endpoints, objects, and fields are needed to retrieve:
+  - orders
+  - discount code usage
+  - discounted sales / amounts
+  - attributed revenue or nearest available proxy
+  - total sales / total orders if available
+- Whether order-level discount code data is sufficient to connect back to campaigns
+- Which fields should be treated as source-of-truth
+
+3. Matching feasibility
+- Whether campaign name parsing is sufficient to extract:
+  - send date
+  - producer/topic
+  - campaign type
+  - offer value
+  - code
+- Whether Shopify order data can be reliably matched to campaigns using parsed discount code
+- What happens if:
+  - code = None
+  - campaign name is malformed
+  - the same code appears across multiple campaigns
+  - multiple campaigns share overlapping windows
+  - bin sale / holiday sale logic is not clearly labeled
+
+4. Historical tracking feasibility
+- What structure would support storing one row per campaign each week
+- What unique key would best identify a campaign record over time
+- Which fields should definitely be preserved in a campaign history table
+
+=====================
+RESEARCH REQUIREMENTS
+=====================
+
+In this phase, you should:
+- inspect the actual APIs if possible
+- verify real field availability instead of assuming
+- identify ambiguity, gaps, and risks
+- distinguish between directly available fields vs proxy / derived logic
+- not invent fields that do not exist
+- explicitly note if a metric may need to be derived instead of fetched directly
+
+If lightweight test calls are helpful to confirm schema, you may do them.
+If sample response inspection is needed, do it carefully and summarize the findings.
+Do not build the final workflow yet.
+
+=====================
+OUTPUT FORMAT
+=====================
+
+Provide your Phase 1 output in exactly these sections:
+
+## 1. Research Summary
+A concise summary of what data appears available, what can be matched reliably, and the main risks.
+
+## 2. HubSpot Endpoint and Field Mapping
+A structured table with:
+- endpoint / object
+- relevant fields
+- purpose
+- confidence level
+- notes / limitations
+
+## 3. Shopify Endpoint and Field Mapping
+A structured table with:
+- endpoint / object
+- relevant fields
+- purpose
+- confidence level
+- notes / limitations
+
+## 4. Metric Source-of-Truth Assessment
+For each required dashboard metric, state:
+- source system
+- exact field if available
+- derived or direct
+- any caveats
+
+Metrics to assess:
+- Campaign Name
+- Parsed Send Date
+- Producer / Topic
+- Campaign Type
+- Offer Value
+- Discount Code
+- Delivered
+- Attributed Revenue
+- Discounted Revenue
+- Discounted Orders
+- Discounted Sales
+- Total Orders
+- Total Sales
+- $/Delivered
+
+## 5. Matching and Attribution Risks
+List the likely edge cases and failure points.
+
+## 6. Open Questions / Assumptions
+List anything that cannot be confirmed directly and what assumption would likely be needed later.
+
+## 7. Recommendation for Phase 2
+Briefly state what the implementation plan should focus on next.
+
+=====================
+IMPORTANT RESPONSE RULES
+=====================
+
+- Stay in Phase 1 only
+- Do not start implementation planning in detail
+- Do not generate final code
+- Prefer explicit tables over vague summaries
+- Clearly separate “confirmed by API/schema” from “inferred / proposed”
+- If a required field is unavailable directly, say so clearly
+- If something is uncertain, say it is uncertain rather than guessing
+
+Begin Phase 1 Research now.

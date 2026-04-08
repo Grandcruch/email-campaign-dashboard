@@ -558,17 +558,34 @@ def generate_monthly_report(df: pd.DataFrame, year: int, month: int) -> pd.DataF
 # ─── Producer performance report ─────────────────────────────────────────────
 
 def _build_producer_grouped(source_df: pd.DataFrame) -> pd.DataFrame:
-    """Build grouped producer performance from a pre-filtered DataFrame."""
+    """
+    Build grouped producer performance from a pre-filtered DataFrame.
+
+    Producer identity is determined by Discount Code (the source of truth),
+    NOT by the Producer/Topic portion of the email name. One discount code
+    == one producer. Codes are expected to be non-null here (caller filters
+    on Attributed Revenue notna, which excludes EDU/CONTENT/Code=None).
+    """
     if source_df.empty:
         return pd.DataFrame()
 
-    grouped = source_df.groupby("Producer / Topic").agg(
+    # Drop any rows without a usable discount code (defensive — EDU/CONTENT
+    # should already be filtered out by the caller).
+    source_df = source_df[
+        source_df["Discount Code"].notna() &
+        (source_df["Discount Code"].astype(str) != "") &
+        (source_df["Discount Code"] != "None")
+    ].copy()
+    if source_df.empty:
+        return pd.DataFrame()
+
+    grouped = source_df.groupby("Discount Code").agg(
         Campaign_Count=("Campaign Name", "count"),
         Total_Attributed_Revenue=("Attributed Revenue", "sum"),
         Total_Sales=("Total Sales", "sum"),
         Total_Discounted_Orders=("Discounted Orders", "sum"),
         Total_Delivered=("Delivered", "sum"),
-    ).reset_index()
+    ).reset_index().rename(columns={"Discount Code": "Producer"})
 
     grouped["Revenue per Delivered"] = (
         grouped["Total_Attributed_Revenue"] / grouped["Total_Delivered"].replace(0, float("nan"))
@@ -577,20 +594,20 @@ def _build_producer_grouped(source_df: pd.DataFrame) -> pd.DataFrame:
         grouped["Total_Attributed_Revenue"] / grouped["Campaign_Count"]
     ).round(2)
 
-    # Best / worst campaign per producer
+    # Best / worst campaign per producer (grouping by discount code)
     best_map = {}
     worst_map = {}
-    for producer, grp in source_df.groupby("Producer / Topic"):
+    for code, grp in source_df.groupby("Discount Code"):
         rev = grp[grp["Attributed Revenue"] > 0]
         if not rev.empty:
-            best_map[producer] = rev.loc[rev["Attributed Revenue"].idxmax(), "Campaign Name"]
-            worst_map[producer] = rev.loc[rev["Attributed Revenue"].idxmin(), "Campaign Name"]
+            best_map[code] = rev.loc[rev["Attributed Revenue"].idxmax(), "Campaign Name"]
+            worst_map[code] = rev.loc[rev["Attributed Revenue"].idxmin(), "Campaign Name"]
         else:
-            best_map[producer] = "N/A"
-            worst_map[producer] = "N/A"
+            best_map[code] = "N/A"
+            worst_map[code] = "N/A"
 
-    grouped["Best Campaign"] = grouped["Producer / Topic"].map(best_map)
-    grouped["Worst Campaign"] = grouped["Producer / Topic"].map(worst_map)
+    grouped["Best Campaign"] = grouped["Producer"].map(best_map)
+    grouped["Worst Campaign"] = grouped["Producer"].map(worst_map)
 
     grouped.sort_values("Total_Attributed_Revenue", ascending=False, inplace=True)
     grouped.reset_index(drop=True, inplace=True)
