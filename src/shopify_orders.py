@@ -15,6 +15,16 @@ from .auth import ShopifyAuth
 from .config import SHOPIFY_API_VERSION
 
 
+def _normalize_code(code: str) -> str:
+    """Normalize a discount code for comparison.
+
+    Shopify silently strips apostrophes from discount codes on orders
+    (e.g. O'Shaughnessy → OShaughnessy). Normalize both sides so
+    matching still works.
+    """
+    return code.replace("'", "").replace("\u2019", "").lower()
+
+
 @dataclass
 class OrderAttribution:
     """Attribution results for a single order matched to a campaign."""
@@ -86,15 +96,17 @@ def _attribute_order(order: dict, campaign_code: str) -> OrderAttribution | None
     discount_value = total discount dollar amount on those items
     """
     # Check if the order used this campaign's code
-    order_codes = [c.get("code", "").lower() for c in order.get("discount_codes", [])]
-    if campaign_code.lower() not in order_codes:
+    # Shopify strips apostrophes from codes, so normalize both sides.
+    norm_campaign = _normalize_code(campaign_code)
+    order_codes = [_normalize_code(c.get("code", "")) for c in order.get("discount_codes", [])]
+    if norm_campaign not in order_codes:
         return None
 
     # Find the discount_application_index for the campaign code
     campaign_app_index = None
     for i, app in enumerate(order.get("discount_applications", [])):
         if (app.get("type") == "discount_code"
-                and app.get("code", "").lower() == campaign_code.lower()):
+                and _normalize_code(app.get("code", "")) == norm_campaign):
             campaign_app_index = i
             break
 
