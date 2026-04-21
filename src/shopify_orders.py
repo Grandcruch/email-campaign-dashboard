@@ -22,7 +22,7 @@ def _normalize_code(code: str) -> str:
     (e.g. O'Shaughnessy → OShaughnessy). Normalize both sides so
     matching still works.
     """
-    return code.replace("'", "").replace("\u2019", "").lower()
+    return code.replace("'", "").replace("’", "").lower()
 
 
 @dataclass
@@ -58,13 +58,18 @@ def _fetch_orders_in_window(
     start_date: date,
     end_date: date,
 ) -> list[dict]:
-    """Fetch all Shopify orders in [start_date, end_date) with pagination."""
+    """Fetch all Shopify orders in [start_date, end_date] (both inclusive) with pagination.
+
+    Uses midnight UTC of start_date as the lower bound and end-of-day UTC
+    of end_date (23:59:59Z) as the upper bound so that orders placed anywhere
+    on end_date are captured regardless of time-of-day.
+    """
     base_url = f"https://{auth.store_domain}/admin/api/{SHOPIFY_API_VERSION}/orders.json"
     all_orders: list[dict] = []
     params = {
         "status": "any",
         "created_at_min": f"{start_date.isoformat()}T00:00:00Z",
-        "created_at_max": f"{end_date.isoformat()}T00:00:00Z",
+        "created_at_max": f"{end_date.isoformat()}T23:59:59Z",
         "limit": 250,
     }
 
