@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from .auth import hubspot_headers
 from .parser import parse_campaign_name, ParsedCampaign
 from .config import DATA_START_DATE
+from ._http_retry import get_with_retry
 
 V3_EMAILS_URL = "https://api.hubapi.com/marketing/v3/emails"
 V1_CAMPAIGN_URL = "https://api.hubapi.com/email/public/v1/campaigns"
@@ -43,7 +44,7 @@ def _fetch_v3_emails(token: str) -> list[dict]:
     params: dict = {"limit": 100, "orderBy": "-publishDate"}
 
     while True:
-        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        resp = get_with_retry(url, headers=headers, params=params)
         resp.raise_for_status()
         data = resp.json()
         results = data.get("results", [])

@@ -7,12 +7,12 @@ Supports two matching modes:
    like BIN Sale where discount_codes[] is empty)
 """
 
-import requests
 from datetime import date, timedelta
 from dataclasses import dataclass, field
 
 from .auth import ShopifyAuth
 from .config import SHOPIFY_API_VERSION
+from ._http_retry import get_with_retry
 
 
 def _normalize_code(code: str) -> str:
@@ -69,7 +69,7 @@ def _fetch_orders_in_window(
     }
 
     while True:
-        resp = requests.get(base_url, headers=auth.headers(), params=params, timeout=30)
+        resp = get_with_retry(base_url, headers=auth.headers(), params=params)
         resp.raise_for_status()
         data = resp.json()
         orders = data.get("orders", [])

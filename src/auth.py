@@ -5,6 +5,8 @@ auth.py — Shopify OAuth2 client-credentials token manager + HubSpot header hel
 import time
 import requests
 
+from ._http_retry import post_with_retry
+
 
 class ShopifyAuth:
     """
@@ -26,7 +28,7 @@ class ShopifyAuth:
         return self._access_token  # type: ignore[return-value]
 
     def _refresh(self) -> None:
-        resp = requests.post(
+        resp = post_with_retry(
             f"https://{self.store_domain}/admin/oauth/access_token",
             data={
                 "grant_type": "client_credentials",
@@ -34,7 +36,6 @@ class ShopifyAuth:
                 "client_secret": self.client_secret,
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
