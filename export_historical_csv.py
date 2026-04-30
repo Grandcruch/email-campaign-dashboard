@@ -100,13 +100,19 @@ def run_export():
     seen = set()
 
     # Standard code attribution
+    attribution_failures: list[str] = []
     for code, send_date, window in attribution_tasks:
         dedup_key = f"{code.lower()}|{send_date}|{window}"
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
         print(f"  Attributing: {code} (window: {send_date} + {window}d)...")
-        attr = compute_attribution(shopify_auth, code, send_date, window)
+        try:
+            attr = compute_attribution(shopify_auth, code, send_date, window)
+        except Exception as exc:
+            print(f"    SKIPPED ({type(exc).__name__}): {exc}")
+            attribution_failures.append(f"{code} @ {send_date}")
+            continue
         storage_key = f"{code.lower()}|{send_date}"
         attributions[storage_key] = attr
 
@@ -119,13 +125,22 @@ def run_export():
         members = get_family_identifiers(family_key, families)
         title_ids = [m.identifier for m in members]
         print(f"  Attributing family: {family_key} -> {title_ids} (window: {send_date} + {window}d)...")
-        attr = compute_family_attribution(
-            shopify_auth, family_key, title_ids, send_date, window,
-        )
+        try:
+            attr = compute_family_attribution(
+                shopify_auth, family_key, title_ids, send_date, window,
+            )
+        except Exception as exc:
+            print(f"    SKIPPED ({type(exc).__name__}): {exc}")
+            attribution_failures.append(f"{family_key} @ {send_date}")
+            continue
         storage_key = f"{family_key.lower()}|{send_date}"
         attributions[storage_key] = attr
 
     print(f"  Attribution computed for {len(attributions)} discount code(s)")
+    if attribution_failures:
+        print(f"  WARNING: {len(attribution_failures)} campaign(s) skipped due to Shopify errors:")
+        for label in attribution_failures:
+            print(f"    - {label}")
 
     # ── Step 5: Assemble dashboard rows ──────────────────────────────────
     print("\n[5/6] Assembling dashboard rows...")

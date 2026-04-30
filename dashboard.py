@@ -617,13 +617,18 @@ def run_pipeline() -> dict:
         seen = set()
 
         # Standard code attribution
+        attribution_failures: list[tuple[str, str]] = []
         for code, send_date, window in attribution_tasks:
             dedup_key = f"{code.lower()}|{send_date}|{window}"
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
             status.update(label=f"Attributing: {code}...")
-            attr = compute_attribution(shopify_auth, code, send_date, window)
+            try:
+                attr = compute_attribution(shopify_auth, code, send_date, window)
+            except Exception as exc:
+                attribution_failures.append((f"{code} @ {send_date}", str(exc)))
+                continue
             storage_key = f"{code.lower()}|{send_date}"
             attributions[storage_key] = attr
 
@@ -636,11 +641,21 @@ def run_pipeline() -> dict:
             members = get_family_identifiers(family_key, families)
             title_ids = [m.identifier for m in members]
             status.update(label=f"Attributing family: {family_key} ({len(title_ids)} codes)...")
-            attr = compute_family_attribution(
-                shopify_auth, family_key, title_ids, send_date, window,
-            )
+            try:
+                attr = compute_family_attribution(
+                    shopify_auth, family_key, title_ids, send_date, window,
+                )
+            except Exception as exc:
+                attribution_failures.append((f"{family_key} @ {send_date}", str(exc)))
+                continue
             storage_key = f"{family_key.lower()}|{send_date}"
             attributions[storage_key] = attr
+
+        if attribution_failures:
+            st.warning(
+                "Some campaigns could not be attributed and were skipped:\n\n"
+                + "\n".join(f"- {label}: {msg}" for label, msg in attribution_failures)
+            )
 
         # Step 5: Assemble dashboard
         status.update(label="Assembling dashboard rows...")
