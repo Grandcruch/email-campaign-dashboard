@@ -1120,14 +1120,25 @@ with tab_weekly:
 
         # ── Supporting Detail Table ──────────────────────────────────────
         section_title("Campaign Details")
+
+        # Derive Sales per Delivered = Total Sales / Delivered.
+        # NaN-safe: null Total Sales (EDU/CONTENT) propagates; 0-Delivered
+        # avoids divide-by-zero by becoming NaN.
+        details_df = completed_week_df.copy()
+        if "Total Sales" in details_df.columns and "Delivered" in details_df.columns:
+            details_df["Sales per Delivered"] = (
+                details_df["Total Sales"]
+                / details_df["Delivered"].replace(0, float("nan"))
+            )
+
         display_cols = [
             "Parsed Send Date", "Discount Code", "Campaign Name",
             "Discounted Orders", "Delivered", "Attributed Revenue",
-            "Total Sales", "Revenue per Delivered",
+            "Total Sales", "Revenue per Delivered", "Sales per Delivered",
         ]
-        available = [c for c in display_cols if c in completed_week_df.columns]
+        available = [c for c in display_cols if c in details_df.columns]
         st.dataframe(
-            completed_week_df[available],
+            details_df[available],
             column_config={
                 "Parsed Send Date": st.column_config.DateColumn("Send Date", width="small"),
                 "Campaign Name": st.column_config.TextColumn("Campaign", width="large"),
@@ -1135,6 +1146,7 @@ with tab_weekly:
                 "Attributed Revenue": st.column_config.NumberColumn("Attr. Revenue", format="$%.2f"),
                 "Total Sales": st.column_config.NumberColumn("Total Sales", format="$%.2f"),
                 "Revenue per Delivered": st.column_config.NumberColumn("Rev/Delivered", format="$%.4f"),
+                "Sales per Delivered": st.column_config.NumberColumn("Sales/Delivered", format="$%.4f"),
             },
             use_container_width=True,
             hide_index=True,
