@@ -639,6 +639,177 @@ def generate_producer_report(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     return current_df, final_df
 
 
+def generate_producer_analytics(
+    df: pd.DataFrame,
+    producer_map: dict[str, str],
+    offer_type_map: dict[str, str],
+    tier_map: dict[str, str],
+    top_region_map: dict[str, str],
+    sub_region_map: dict[str, str],
+) -> dict[str, pd.DataFrame]:
+    """
+    Build producer analytics from finalized campaigns only.
+
+    Returns a dict with keys:
+      producer_detail_df  — per-producer revenue, excl. Other- / BIN / Holiday / etc.
+      overview_df         — same aggregation but including Other- buckets
+      campaign_detail_df  — per-campaign rows with producer/tier/region columns attached
+      unmapped_df         — codes that resolved to neither a family key nor any producer row
+      tier_detail_df      — revenue rolled up by tier
+      region_detail_df    — revenue rolled up by top-region + sub-region
+    """
+    from .producer_mapping import (
+        EXCLUDED_OFFER_TYPES,
+        INCLUDED_OFFER_TYPES,
+        UNMAPPED_LABEL,
+        resolve_producer,
+        get_offer_type,
+        resolve_tier,
+        resolve_region,
+    )
+
+    # Finalized campaigns with attribution attempted (non-null Attributed Revenue)
+    base = df[(df["is_final_snapshot"] == True) & df["Attributed Revenue"].notna()].copy()
+
+    if base.empty:
+        empty = pd.DataFrame()
+        return {
+            "producer_detail_df": empty,
+            "overview_df": empty,
+            "campaign_detail_df": empty,
+            "unmapped_df": empty,
+            "tier_detail_df": empty,
+            "region_detail_df": empty,
+        }
+
+    def _enrich(row):
+        code = str(row.get("Discount Code") or "").strip()
+        producer = resolve_producer(code, producer_map)
+        offer_type = get_offer_type(code, offer_type_map)
+        if producer is None:
+            producer = UNMAPPED_LABEL
+        tier = resolve_tier(producer, tier_map) if producer != UNMAPPED_LABEL else "Untiered"
+        top_region, sub_region = resolve_region(producer, top_region_map, sub_region_map) \
+            if producer != UNMAPPED_LABEL else ("Unmapped Region", "Unmapped Region")
+        return pd.Series({
+            "_producer": producer,
+            "_offer_type": offer_type,
+            "_tier": tier,
+            "_top_region": top_region,
+            "_sub_region": sub_region,
+        })
+
+    enriched = base.join(base.apply(_enrich, axis=1))
+
+    # campaign_detail_df — all finalized rows with enriched columns
+    campaign_detail_df = enriched.rename(columns={
+        "_producer": "Producer",
+        "_offer_type": "Offer Type",
+        "_tier": "Tier",
+        "_top_region": "Top Region",
+        "_sub_region": "Sub-Region",
+    }).copy()
+
+    # unmapped_df — codes that landed on UNMAPPED_LABEL
+    unmapped_rows = enriched[enriched["_producer"] == UNMAPPED_LABEL]
+    if not unmapped_rows.empty:
+        unmapped_df = unmapped_rows[["Campaign Name", "Discount Code", "Attributed Revenue",
+                                     "Delivered", "Send Date"]].copy()
+    else:
+        unmapped_df = pd.DataFrame(columns=["Campaign Name", "Discount Code",
+                                             "Attributed Revenue", "Delivered", "Send Date"])
+
+    def _agg_by_producer(subset: pd.DataFrame) -> pd.DataFrame:
+        rev_col = "Attributed Revenue"
+        disc_col = "Discount Value"
+        orders_col = "Discounted Orders"
+        delivered_col = "Delivered"
+        grouped = (
+            subset.groupby("_producer", dropna=False)
+            .agg(
+                Total_Attributed_Revenue=(rev_col, "sum"),
+                Total_Discount_Value=(disc_col, lambda s: s.fillna(0).sum()),
+                Total_Discounted_Orders=(orders_col, lambda s: s.fillna(0).sum()),
+                Total_Delivered=(delivered_col, "sum"),
+                Campaign_Count=("Campaign Name", "count"),
+            )
+            .reset_index()
+            .rename(columns={"_producer": "Producer"})
+        )
+        grouped["Revenue per Delivered"] = (
+            grouped["Total_Attributed_Revenue"] / grouped["Total_Delivered"].replace(0, pd.NA)
+        )
+        grouped.sort_values("Total_Attributed_Revenue", ascending=False, inplace=True)
+        grouped.reset_index(drop=True, inplace=True)
+        return grouped
+
+    # producer_detail_df — only INCLUDED offer types (excludes Other- buckets)
+    included_mask = enriched["_offer_type"].isin(INCLUDED_OFFER_TYPES)
+    producer_detail_df = _agg_by_producer(enriched[included_mask])
+
+    # overview_df — all offer types (includes Other- bucket rows)
+    overview_df = _agg_by_producer(enriched)
+
+    # tier_detail_df
+    rev_col, disc_col, orders_col, delivered_col = (
+        "Attributed Revenue", "Discount Value", "Discounted Orders", "Delivered"
+    )
+    tier_subset = enriched[included_mask].copy()
+    if not tier_subset.empty:
+        tier_detail_df = (
+            tier_subset.groupby("_tier", dropna=False)
+            .agg(
+                Total_Attributed_Revenue=(rev_col, "sum"),
+                Total_Discount_Value=(disc_col, lambda s: s.fillna(0).sum()),
+                Total_Discounted_Orders=(orders_col, lambda s: s.fillna(0).sum()),
+                Total_Delivered=(delivered_col, "sum"),
+                Producer_Count=("_producer", "nunique"),
+            )
+            .reset_index()
+            .rename(columns={"_tier": "Tier"})
+        )
+        tier_detail_df["Revenue per Delivered"] = (
+            tier_detail_df["Total_Attributed_Revenue"]
+            / tier_detail_df["Total_Delivered"].replace(0, pd.NA)
+        )
+        tier_detail_df.sort_values("Total_Attributed_Revenue", ascending=False, inplace=True)
+        tier_detail_df.reset_index(drop=True, inplace=True)
+    else:
+        tier_detail_df = pd.DataFrame()
+
+    # region_detail_df
+    if not tier_subset.empty:
+        region_detail_df = (
+            tier_subset.groupby(["_top_region", "_sub_region"], dropna=False)
+            .agg(
+                Total_Attributed_Revenue=(rev_col, "sum"),
+                Total_Discount_Value=(disc_col, lambda s: s.fillna(0).sum()),
+                Total_Discounted_Orders=(orders_col, lambda s: s.fillna(0).sum()),
+                Total_Delivered=(delivered_col, "sum"),
+                Producer_Count=("_producer", "nunique"),
+            )
+            .reset_index()
+            .rename(columns={"_top_region": "Top Region", "_sub_region": "Sub-Region"})
+        )
+        region_detail_df["Revenue per Delivered"] = (
+            region_detail_df["Total_Attributed_Revenue"]
+            / region_detail_df["Total_Delivered"].replace(0, pd.NA)
+        )
+        region_detail_df.sort_values("Total_Attributed_Revenue", ascending=False, inplace=True)
+        region_detail_df.reset_index(drop=True, inplace=True)
+    else:
+        region_detail_df = pd.DataFrame()
+
+    return {
+        "producer_detail_df": producer_detail_df,
+        "overview_df": overview_df,
+        "campaign_detail_df": campaign_detail_df,
+        "unmapped_df": unmapped_df,
+        "tier_detail_df": tier_detail_df,
+        "region_detail_df": region_detail_df,
+    }
+
+
 # ─── QA: Excluded campaigns ─────────────────────────────────────────────────
 
 def generate_excluded_campaigns(records: list[CampaignRecord]) -> pd.DataFrame:

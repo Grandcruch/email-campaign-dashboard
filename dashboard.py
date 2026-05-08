@@ -19,6 +19,8 @@ import altair as alt
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+PRODUCER_CODE_EXCEL = os.path.join(PROJECT_ROOT, "Producer - Discount Code Mapping - Copy.xlsx")
+PRODUCER_PRODUCT_EXCEL = os.path.join(PROJECT_ROOT, "Producer - Product Mapping - Copy.xlsx")
 sys.path.insert(0, PROJECT_ROOT)
 
 from src.config import load_env, DATA_START_DATE, OUTPUT_DIR
@@ -34,12 +36,19 @@ from src.reports import (
     generate_weekly_insights,
     generate_monthly_report,
     generate_producer_report,
+    generate_producer_analytics,
     generate_excluded_campaigns,
     generate_unmatched_codes_report,
     update_history,
     generate_qa_summary,
     write_all_outputs,
     MIN_DELIVERED_THRESHOLD,
+)
+from src.producer_mapping import (
+    load_producer_mapping,
+    load_offer_type_mapping,
+    load_tier_mapping,
+    load_region_mapping,
 )
 
 
@@ -669,6 +678,16 @@ def run_pipeline() -> dict:
         monthly_df = generate_monthly_report(df, run_date.year, run_date.month)
         producer_current_df, producer_final_df = generate_producer_report(df)
 
+        # Step 6b: Producer analytics (new)
+        status.update(label="Loading producer mapping data...")
+        producer_map = load_producer_mapping(PRODUCER_CODE_EXCEL)
+        offer_type_map = load_offer_type_mapping(PRODUCER_CODE_EXCEL)
+        tier_map = load_tier_mapping(PRODUCER_PRODUCT_EXCEL)
+        top_region_map, sub_region_map = load_region_mapping(PRODUCER_PRODUCT_EXCEL)
+        producer_analytics = generate_producer_analytics(
+            df, producer_map, offer_type_map, tier_map, top_region_map, sub_region_map
+        )
+
         # Step 7: QA
         status.update(label="Fetching Shopify orders for unmatched-code analysis...")
         excluded_df = generate_excluded_campaigns(records)
@@ -714,6 +733,7 @@ def run_pipeline() -> dict:
         "monthly_df": monthly_df,
         "producer_current_df": producer_current_df,
         "producer_final_df": producer_final_df,
+        "producer_analytics": producer_analytics,
         "excluded_df": excluded_df,
         "unmatched_df": unmatched_df,
         "qa_summary": qa_summary,
@@ -1380,118 +1400,188 @@ with tab_monthly:
 
 with tab_producer:
 
-    # ── Scope / Context + View Toggle ────────────────────────────────────
     st.markdown(
-        f'<div class="context-line">Producer-level aggregation &middot; All tracked campaigns</div>',
+        '<div class="context-line">Producer analytics &middot; Finalized campaigns only (attribution window closed) &middot; Excludes BIN Sale, Holiday, Large Format, Category, and Automation offers</div>',
         unsafe_allow_html=True,
     )
 
-    view = st.radio(
-        "View",
-        ["current-to-date", "finalized-only"],
-        horizontal=True,
-        help="Current-to-date includes all main-table campaigns. "
-             "Finalized-only includes only campaigns whose attribution window has closed.",
-        label_visibility="collapsed",
-    )
+    _pa = data["producer_analytics"]
+    _pa_detail = _pa.get("producer_detail_df", pd.DataFrame())
+    _pa_overview = _pa.get("overview_df", pd.DataFrame())
+    _pa_campaigns = _pa.get("campaign_detail_df", pd.DataFrame())
+    _pa_unmapped = _pa.get("unmapped_df", pd.DataFrame())
+    _pa_tier = _pa.get("tier_detail_df", pd.DataFrame())
+    _pa_region = _pa.get("region_detail_df", pd.DataFrame())
 
-    if view == "current-to-date":
-        prod_df = _producer_current_df
+    if _pa_overview.empty:
+        st.info("No finalized producer data available yet.")
     else:
-        prod_df = _producer_final_df
-
-    if prod_df.empty:
-        st.info(f"No data for the {view} view.")
-    else:
-        prod_view_df = prod_df.drop(columns=["View"], errors="ignore")
-
         # ── KPI Row ──────────────────────────────────────────────────────
-        prod_total_sales = prod_view_df['Total_Sales'].sum() if 'Total_Sales' in prod_view_df.columns else 0
+        _pa_total_rev = _pa_detail["Total_Attributed_Revenue"].sum() if not _pa_detail.empty else 0
+        _pa_total_orders = _pa_detail["Total_Discounted_Orders"].sum() if not _pa_detail.empty else 0
+        _pa_n_producers = _pa_detail["Producer"].nunique() if not _pa_detail.empty else 0
+        _pa_n_campaigns = _pa_detail["Campaign_Count"].sum() if not _pa_detail.empty else 0
         render_kpi_row([
-            {"label": "Attributed Revenue", "value": f"${prod_view_df['Total_Attributed_Revenue'].sum():,.2f}",
-             "sub": "Net sales, discounted items"},
-            {"label": "Total Sales", "value": f"${prod_total_sales:,.2f}",
-             "sub": "Full matched orders"},
-            {"label": "Producers", "value": str(len(prod_view_df))},
-            {"label": "Total Campaigns", "value": f"{prod_view_df['Campaign_Count'].sum():.0f}"},
+            {"label": "Attributed Revenue", "value": f"${_pa_total_rev:,.2f}", "sub": "Standalone & combo offers"},
+            {"label": "Producers", "value": str(int(_pa_n_producers))},
+            {"label": "Campaigns", "value": str(int(_pa_n_campaigns))},
+            {"label": "Discounted Orders", "value": f"{int(_pa_total_orders):,}"},
         ])
 
         spacer("lg")
 
-        # ── Producer Revenue Ranking ─────────────────────────────────────
-        section_title("Producer Revenue Ranking", "Ranked by selected metric")
+        # ── E.1: Producer Revenue Pie Chart ──────────────────────────────
+        section_title("Producer Revenue", "Share of attributed revenue by producer (finalized, standalone & combo offers)")
 
-        prod_metric = st.radio(
-            "Rank by",
-            ["Total_Attributed_Revenue", "Total_Sales", "Revenue per Delivered", "Total_Discounted_Orders"],
-            format_func=lambda x: {
-                "Total_Attributed_Revenue": "Attributed Revenue",
-                "Total_Sales": "Total Sales",
-                "Revenue per Delivered": "Revenue per Delivered",
-                "Total_Discounted_Orders": "Discounted Orders",
-            }.get(x, x),
-            horizontal=True,
-            key="producer_bar_metric",
-            label_visibility="collapsed",
-        )
+        _pie_data = _pa_overview[_pa_overview["Total_Attributed_Revenue"] > 0][
+            ["Producer", "Total_Attributed_Revenue"]
+        ].copy()
+        _pie_data = _pie_data.sort_values("Total_Attributed_Revenue", ascending=False)
 
-        chart_prod = prod_view_df[["Producer", prod_metric]].copy()
-        chart_prod = chart_prod[chart_prod[prod_metric].notna()]
-        chart_prod = chart_prod.sort_values(prod_metric, ascending=True)
+        if not _pie_data.empty:
+            _pie_chart = alt.Chart(_pie_data).mark_arc(innerRadius=70, outerRadius=160).encode(
+                theta=alt.Theta("Total_Attributed_Revenue:Q", stack=True),
+                color=alt.Color(
+                    "Producer:N",
+                    scale=alt.Scale(scheme="reds"),
+                    legend=alt.Legend(orient="right", title="Producer"),
+                ),
+                tooltip=[
+                    alt.Tooltip("Producer:N", title="Producer"),
+                    alt.Tooltip("Total_Attributed_Revenue:Q", title="Attributed Revenue", format="$,.2f"),
+                ],
+            ).properties(height=380)
+            st.altair_chart(styled_chart(_pie_chart), use_container_width=True)
 
-        if prod_metric == "Revenue per Delivered":
-            fmt = "$,.4f"
-        elif prod_metric in ("Total_Attributed_Revenue", "Total_Sales"):
-            fmt = "$,.2f"
+        spacer("lg")
+
+        # ── E.2: Campaign Drill-Down ──────────────────────────────────────
+        section_title("Campaign Drill-Down", "Select a producer to see individual campaign results")
+
+        if not _pa_overview.empty:
+            _all_producers = sorted(_pa_overview["Producer"].dropna().unique().tolist())
+            _selected_producer = st.selectbox(
+                "Producer",
+                options=["— Select a producer —"] + _all_producers,
+                key="producer_drilldown_select",
+                label_visibility="collapsed",
+            )
+
+            if _selected_producer != "— Select a producer —" and not _pa_campaigns.empty:
+                _drill = _pa_campaigns[_pa_campaigns["Producer"] == _selected_producer].copy()
+                if _drill.empty:
+                    st.info(f"No finalized campaigns found for {_selected_producer}.")
+                else:
+                    _drill_cols = [c for c in [
+                        "Campaign Name", "Send Date", "Discount Code",
+                        "Attributed Revenue", "Discount Value", "Discounted Orders",
+                        "Delivered", "Revenue per Delivered", "Offer Type",
+                    ] if c in _drill.columns]
+                    st.dataframe(
+                        _drill[_drill_cols],
+                        column_config={
+                            "Attributed Revenue": st.column_config.NumberColumn("Attr. Revenue", format="$%.2f"),
+                            "Discount Value": st.column_config.NumberColumn("Discount Value", format="$%.2f"),
+                            "Revenue per Delivered": st.column_config.NumberColumn("Rev/Delivered", format="$%.4f"),
+                        },
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+        spacer("lg")
+
+        # ── E.3: Region Performance ───────────────────────────────────────
+        section_title("Region Performance", "Attributed revenue by top region and sub-region")
+
+        if not _pa_region.empty:
+            _region_bar = alt.Chart(_pa_region).mark_bar(cornerRadiusEnd=3).encode(
+                y=alt.Y("Sub-Region:N", sort="-x", title="Sub-Region"),
+                x=alt.X("Total_Attributed_Revenue:Q", title="Attributed Revenue ($)"),
+                color=alt.Color("Top Region:N", scale=alt.Scale(scheme="reds")),
+                tooltip=[
+                    alt.Tooltip("Top Region:N"),
+                    alt.Tooltip("Sub-Region:N"),
+                    alt.Tooltip("Total_Attributed_Revenue:Q", title="Attr. Revenue", format="$,.2f"),
+                    alt.Tooltip("Total_Discounted_Orders:Q", title="Orders", format=",.0f"),
+                    alt.Tooltip("Producer_Count:Q", title="Producers", format=",.0f"),
+                ],
+            ).properties(height=max(len(_pa_region) * 38, 200))
+            st.altair_chart(styled_chart(_region_bar), use_container_width=True)
+
+            st.dataframe(
+                _pa_region,
+                column_config={
+                    "Total_Attributed_Revenue": st.column_config.NumberColumn("Attr. Revenue", format="$%.2f"),
+                    "Total_Discount_Value": st.column_config.NumberColumn("Discount Value", format="$%.2f"),
+                    "Total_Discounted_Orders": st.column_config.NumberColumn("Orders", format="%.0f"),
+                    "Total_Delivered": st.column_config.NumberColumn("Delivered", format="%.0f"),
+                    "Revenue per Delivered": st.column_config.NumberColumn("Rev/Delivered", format="$%.4f"),
+                    "Producer_Count": st.column_config.NumberColumn("Producers", format="%.0f"),
+                },
+                use_container_width=True,
+                hide_index=True,
+            )
         else:
-            fmt = ",.0f"
-
-        prod_bar = alt.Chart(chart_prod).mark_bar(
-            color=CLR_PRODUCER,
-            cornerRadiusEnd=3,
-        ).encode(
-            y=alt.Y("Producer:N", sort=None, title="Discount Code"),
-            x=alt.X(f"{prod_metric}:Q", title=prod_metric.replace("_", " ")),
-            tooltip=[
-                alt.Tooltip("Producer:N", title="Discount Code"),
-                alt.Tooltip(f"{prod_metric}:Q", format=fmt),
-            ],
-        ).properties(height=max(len(chart_prod) * 35, 200))
-
-        st.altair_chart(styled_chart(prod_bar), use_container_width=True)
+            st.info("No region data available.")
 
         spacer("lg")
 
-        # ── Producer Insights ────────────────────────────────────────────
-        section_title("Producer Insights")
-        render_insight_card(_generate_producer_insights(prod_view_df, view))
+        # ── E.6: Tier Performance ─────────────────────────────────────────
+        section_title("Tier Performance", "Attributed revenue by producer tier")
+
+        if not _pa_tier.empty:
+            _tier_bar = alt.Chart(_pa_tier).mark_bar(color=CLR_PRODUCER, cornerRadiusEnd=3).encode(
+                y=alt.Y("Tier:N", sort="-x", title="Tier"),
+                x=alt.X("Total_Attributed_Revenue:Q", title="Attributed Revenue ($)"),
+                tooltip=[
+                    alt.Tooltip("Tier:N"),
+                    alt.Tooltip("Total_Attributed_Revenue:Q", title="Attr. Revenue", format="$,.2f"),
+                    alt.Tooltip("Total_Discounted_Orders:Q", title="Orders", format=",.0f"),
+                    alt.Tooltip("Producer_Count:Q", title="Producers", format=",.0f"),
+                ],
+            ).properties(height=max(len(_pa_tier) * 50, 150))
+            st.altair_chart(styled_chart(_tier_bar), use_container_width=True)
+
+            st.dataframe(
+                _pa_tier,
+                column_config={
+                    "Total_Attributed_Revenue": st.column_config.NumberColumn("Attr. Revenue", format="$%.2f"),
+                    "Total_Discount_Value": st.column_config.NumberColumn("Discount Value", format="$%.2f"),
+                    "Total_Discounted_Orders": st.column_config.NumberColumn("Orders", format="%.0f"),
+                    "Total_Delivered": st.column_config.NumberColumn("Delivered", format="%.0f"),
+                    "Revenue per Delivered": st.column_config.NumberColumn("Rev/Delivered", format="$%.4f"),
+                    "Producer_Count": st.column_config.NumberColumn("Producers", format="%.0f"),
+                },
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("No tier data available.")
 
         spacer("lg")
 
-        # ── Supporting Detail Table ──────────────────────────────────────
-        section_title("Producer Details", "Grouped by discount code")
-        st.dataframe(
-            prod_view_df,
-            column_config={
-                "Producer": st.column_config.TextColumn(
-                    "Discount Code",
-                ),
-                "Total_Attributed_Revenue": st.column_config.NumberColumn(
-                    "Attr. Revenue", format="$%.2f"
-                ),
-                "Total_Sales": st.column_config.NumberColumn(
-                    "Total Sales", format="$%.2f"
-                ),
-                "Revenue per Delivered": st.column_config.NumberColumn(
-                    "Rev/Delivered", format="$%.4f"
-                ),
-                "Avg Revenue per Campaign": st.column_config.NumberColumn(
-                    "Avg Rev/Campaign", format="$%.2f"
-                ),
-            },
-            use_container_width=True,
-            hide_index=True,
-        )
+        # ── Unmapped QA Expander ──────────────────────────────────────────
+        _n_unmapped = len(_pa_unmapped) if not _pa_unmapped.empty else 0
+        with st.expander(f"Unmapped Campaigns — review in QA ({_n_unmapped})", expanded=_n_unmapped > 0):
+            if not _pa_unmapped.empty:
+                st.markdown(
+                    f'<p style="font-size:0.85rem; color:{CLR_TEXT_SECONDARY};">These finalized campaigns have a discount code that does not resolve to any producer in the mapping Excel. Add the code to <strong>Producer - Discount Code Mapping - Copy.xlsx</strong> and refresh.</p>',
+                    unsafe_allow_html=True,
+                )
+                st.dataframe(
+                    _pa_unmapped,
+                    column_config={
+                        "Attributed Revenue": st.column_config.NumberColumn("Attr. Revenue", format="$%.2f"),
+                        "Delivered": st.column_config.NumberColumn("Delivered", format="%.0f"),
+                    },
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.markdown(
+                    f'<p style="color:{CLR_TEXT_MUTED}; font-size:0.85rem;">All finalized campaigns are mapped. No review needed.</p>',
+                    unsafe_allow_html=True,
+                )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
