@@ -714,10 +714,10 @@ def generate_producer_analytics(
     unmapped_rows = enriched[enriched["_producer"] == UNMAPPED_LABEL]
     if not unmapped_rows.empty:
         unmapped_df = unmapped_rows[["Campaign Name", "Discount Code", "Attributed Revenue",
-                                     "Delivered", "Send Date"]].copy()
+                                     "Delivered", "Parsed Send Date"]].copy()
     else:
         unmapped_df = pd.DataFrame(columns=["Campaign Name", "Discount Code",
-                                             "Attributed Revenue", "Delivered", "Send Date"])
+                                             "Attributed Revenue", "Delivered", "Parsed Send Date"])
 
     def _agg_by_producer(subset: pd.DataFrame) -> pd.DataFrame:
         rev_col = "Attributed Revenue"

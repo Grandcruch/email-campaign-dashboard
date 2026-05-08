@@ -1473,7 +1473,7 @@ with tab_producer:
                     st.info(f"No finalized campaigns found for {_selected_producer}.")
                 else:
                     _drill_cols = [c for c in [
-                        "Campaign Name", "Send Date", "Discount Code",
+                        "Campaign Name", "Parsed Send Date", "Discount Code",
                         "Attributed Revenue", "Discount Value", "Discounted Orders",
                         "Delivered", "Revenue per Delivered", "Offer Type",
                     ] if c in _drill.columns]
