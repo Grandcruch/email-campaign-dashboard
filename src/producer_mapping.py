@@ -70,7 +70,7 @@ def load_producer_mapping(excel_path: str) -> dict[str, str]:
                 continue
             for code in _split_codes(row.get("Discount Codes Included")):
                 result[code] = producer
-        print(f"  [producer_mapping] Loaded {len(result)} code→producer entries "
+        print(f"  [producer_mapping] Loaded {len(result)} code->producer entries "
               f"({len(df)} rows)")
         return result
     except Exception as exc:
