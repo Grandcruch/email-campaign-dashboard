@@ -116,7 +116,7 @@ def load_tier_mapping(excel_path: str) -> dict[str, str]:
                 key = _norm(val)
                 if key:
                     result[key] = tier_label
-        print(f"  [producer_mapping] Loaded {len(result)} producer→tier entries")
+        print(f"  [producer_mapping] Loaded {len(result)} producer->tier entries")
         return result
     except Exception as exc:
         print(f"  [producer_mapping] ERROR loading tier map: {exc}")
@@ -147,7 +147,7 @@ def load_region_mapping(excel_path: str) -> tuple[dict[str, str], dict[str, str]
                     if key:
                         top_map[key] = top_region
                         sub_map[key] = sub_region
-        print(f"  [producer_mapping] Loaded {len(top_map)} producer→region entries")
+        print(f"  [producer_mapping] Loaded {len(top_map)} producer->region entries")
         return top_map, sub_map
     except Exception as exc:
         print(f"  [producer_mapping] ERROR loading region map: {exc}")
