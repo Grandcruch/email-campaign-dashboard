@@ -3,7 +3,7 @@ hubspot.py — Fetch HubSpot email campaigns (v3) and delivery stats (v1).
 """
 
 import requests
-from datetime import date
+from datetime import date, timedelta
 from dataclasses import dataclass
 
 from .auth import hubspot_headers
@@ -55,7 +55,8 @@ def _fetch_v3_emails(token: str) -> list[dict]:
 
         # Check if we've gone far enough back — look at last email's publishDate
         last_pub = results[-1].get("publishDate", "")
-        if last_pub and last_pub[:10] < "2026-02-20":
+        stop_date = str(DATA_START_DATE - timedelta(days=30))
+        if last_pub and last_pub[:10] < stop_date:
             # Well past our start date; stop paginating
             break
 

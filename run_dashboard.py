@@ -27,6 +27,7 @@ from src.families import load_family_mapping, is_family_key, get_family_identifi
 from src.reports import (
     assemble_dashboard_rows,
     rows_to_dataframe,
+    apply_ab_grouping,
     generate_weekly_report,
     generate_weekly_insights,
     generate_monthly_report,
@@ -156,7 +157,9 @@ def main():
     print("\n[5/8] Assembling dashboard...")
     dashboard_rows = assemble_dashboard_rows(records, attributions, run_date)
     df = rows_to_dataframe(dashboard_rows)
-    print(f"  Dashboard rows: {len(df)}")
+    pre_ab = len(df)
+    df = apply_ab_grouping(df)
+    print(f"  Dashboard rows: {len(df)} ({pre_ab - len(df)} A/B groups merged)")
 
     # ── Step 6: Generate reports ─────────────────────────────────────────
     print("\n[6/8] Generating reports...")

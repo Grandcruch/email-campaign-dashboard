@@ -29,7 +29,7 @@ from src.hubspot import fetch_campaigns
 from src.overrides import load_overrides, apply_overrides
 from src.shopify_orders import compute_attribution, compute_family_attribution
 from src.families import load_family_mapping, is_family_key, get_family_identifiers
-from src.reports import assemble_dashboard_rows, rows_to_dataframe
+from src.reports import assemble_dashboard_rows, rows_to_dataframe, apply_ab_grouping
 
 # ─── Output file name ────────────────────────────────────────────────────────
 OUTPUT_FILENAME = "Historical Email Offer Performance(2026.3.9~).csv"
@@ -146,6 +146,7 @@ def run_export():
     print("\n[5/6] Assembling dashboard rows...")
     dashboard_rows = assemble_dashboard_rows(records, attributions, run_date)
     df = rows_to_dataframe(dashboard_rows)
+    df = apply_ab_grouping(df)
     print(f"  Total dashboard rows: {len(df)}")
 
     # Filter to finalized campaigns only

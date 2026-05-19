@@ -32,6 +32,7 @@ from src.families import load_family_mapping, is_family_key, get_family_identifi
 from src.reports import (
     assemble_dashboard_rows,
     rows_to_dataframe,
+    apply_ab_grouping,
     generate_weekly_report,
     generate_weekly_insights,
     generate_monthly_report,
@@ -670,6 +671,10 @@ def run_pipeline() -> dict:
         status.update(label="Assembling dashboard rows...")
         dashboard_rows = assemble_dashboard_rows(records, attributions, run_date)
         df = rows_to_dataframe(dashboard_rows)
+
+        # Step 5b: Merge A/B test versions
+        status.update(label="Merging A/B test campaigns...")
+        df = apply_ab_grouping(df)
 
         # Step 6: Reports
         status.update(label="Generating reports...")

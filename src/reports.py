@@ -6,6 +6,7 @@ dual producer report (current-to-date + finalized-only), and Code=None exclusion
 """
 
 import os
+import re
 import csv
 from datetime import date, timedelta
 from dataclasses import dataclass, field
@@ -291,6 +292,182 @@ def apply_bin_grouping(df: pd.DataFrame) -> pd.DataFrame:
         result.sort_values(["Parsed Send Date", "Campaign Name"], ascending=[False, True], inplace=True)
         result.reset_index(drop=True, inplace=True)
 
+    return result
+
+
+# ─── A/B test grouping ────────────────────────────────────────────────────────
+
+_VERSION_SUFFIX_RE = re.compile(
+    r'\s+(?:Version\s+[A-Z]|V\d+)\s*$', re.IGNORECASE,
+)
+_VINTAGE_RE = re.compile(r'\b((?:19|20)\d{2})\b')
+
+
+def _build_ab_combined_name(names: list[str], types: list[str]) -> tuple[str, str]:
+    """
+    Build a merged campaign name and type from A/B test versions.
+    Returns (combined_name, combined_type).
+    """
+    parts_list = [n.split(" - ", 4) for n in names]
+
+    date_str = parts_list[0][0].strip()
+
+    # Types — keep PROD first when mixed
+    unique_types = list(dict.fromkeys(types))
+    if "PROD" in unique_types and unique_types[0] != "PROD":
+        unique_types.remove("PROD")
+        unique_types.insert(0, "PROD")
+    combined_type = "/".join(unique_types)
+
+    offer_value = parts_list[0][3].strip() if len(parts_list[0]) >= 5 else ""
+    code = parts_list[0][4].strip() if len(parts_list[0]) >= 5 else ""
+
+    # Clean producer/topic: strip version suffixes
+    raw_topics = [p[1].strip() if len(p) >= 2 else "" for p in parts_list]
+    cleaned = [_VERSION_SUFFIX_RE.sub("", t).strip() for t in raw_topics]
+    unique_cleaned = list(dict.fromkeys(cleaned))
+
+    if len(unique_cleaned) == 1:
+        combined_topic = unique_cleaned[0]
+    else:
+        # Extract vintages and compare de-vintaged base names
+        all_vintages: list[str] = []
+        bases: list[str] = []
+        for topic in unique_cleaned:
+            vints = _VINTAGE_RE.findall(topic)
+            all_vintages.extend(vints)
+            base = _VINTAGE_RE.sub("", topic).strip()
+            base = re.sub(r'^[/\s]+', '', base)
+            base = re.sub(r'\s+', ' ', base)
+            bases.append(base)
+
+        unique_vintages = sorted(set(all_vintages))
+        unique_bases = list(dict.fromkeys(bases))
+
+        if len(unique_bases) == 1:
+            # Same base, different vintages → "1997/2015 Phelps Insignia"
+            vint_str = "/".join(unique_vintages)
+            combined_topic = f"{vint_str} {unique_bases[0]}".strip()
+        else:
+            # Different bases → find common word prefix, combine suffixes with "&"
+            vint_str = "/".join(unique_vintages) if unique_vintages else ""
+            words_list = [b.split() for b in unique_bases]
+            min_words = min(len(w) for w in words_list)
+            common_words: list[str] = []
+            for i in range(min_words):
+                if all(w[i] == words_list[0][i] for w in words_list):
+                    common_words.append(words_list[0][i])
+                else:
+                    break
+            common = " ".join(common_words)
+            suffixes = [b[len(common):].strip() for b in unique_bases]
+            suffixes = [s for s in suffixes if s]
+            if common and suffixes:
+                base_combined = f"{common} {' & '.join(suffixes)}"
+            elif common:
+                base_combined = common
+            else:
+                base_combined = " & ".join(unique_bases)
+            combined_topic = f"{vint_str} {base_combined}".strip() if vint_str else base_combined
+
+    return f"{date_str} - {combined_topic} - {combined_type} - {offer_value} - {code}", combined_type
+
+
+def apply_ab_grouping(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Combine A/B test campaigns that share the same discount code and send date
+    into single reporting rows.
+
+    Detection: same (Discount Code, Parsed Send Date) with >1 row.
+    HubSpot metrics: SUM.  Shopify metrics: SUM (same code → shared orders).
+    Revenue per Delivered is recomputed from combined values.
+    Non-AB rows pass through unchanged.
+    """
+    if df.empty:
+        return df.copy()
+
+    # Only consider rows with a real discount code
+    has_code = (df["Discount Code"] != "None") & df["Discount Code"].notna()
+    coded = df[has_code].copy()
+    no_code = df[~has_code].copy()
+
+    if coded.empty:
+        return df.copy()
+
+    # Find groups with >1 row sharing the same code + date
+    coded["_group_key"] = (
+        coded["Discount Code"].str.lower() + "|" +
+        coded["Parsed Send Date"].astype(str)
+    )
+    group_sizes = coded.groupby("_group_key").size()
+    ab_keys = set(group_sizes[group_sizes > 1].index)
+
+    if not ab_keys:
+        return df.copy()
+
+    is_ab = coded["_group_key"].isin(ab_keys)
+    non_ab = coded[~is_ab].drop(columns=["_group_key"])
+    ab_rows = coded[is_ab]
+
+    merged_rows: list[dict] = []
+    for gk, grp in ab_rows.groupby("_group_key"):
+        # Sum HubSpot delivery metrics
+        total_delivered = grp["Delivered"].sum()
+        total_opened = grp["Opened"].sum()
+        total_clicked = grp["Clicked"].sum()
+
+        # Sum Shopify metrics (shared code, but each version may have delivered
+        # to different audience segments; attribution is code-level so we keep
+        # the same Shopify figures — take from the row with attribution data)
+        rev_rows = grp[grp["Attributed Revenue"].notna()]
+        if not rev_rows.empty:
+            attr_rev = rev_rows.iloc[0]["Attributed Revenue"]
+            total_sales = rev_rows.iloc[0]["Total Sales"]
+            discount_val = rev_rows.iloc[0]["Discount Value"]
+            disc_orders = rev_rows.iloc[0]["Discounted Orders"]
+        else:
+            attr_rev = None
+            total_sales = None
+            discount_val = None
+            disc_orders = None
+
+        rpd = None
+        if attr_rev is not None and total_delivered > 0:
+            rpd = round(attr_rev / total_delivered, 4)
+
+        # Build combined name
+        names = grp["Campaign Name"].tolist()
+        types = grp["Campaign Type"].tolist()
+        combined_name, combined_type = _build_ab_combined_name(names, types)
+
+        combined = grp.iloc[0].to_dict()
+        combined["Campaign Name"] = combined_name
+        combined["Campaign Type"] = combined_type
+        combined["Parsed Send Date"] = grp["Parsed Send Date"].min()
+        combined["Delivered"] = total_delivered
+        combined["Opened"] = total_opened
+        combined["Clicked"] = total_clicked
+        combined["Attributed Revenue"] = attr_rev
+        combined["Total Sales"] = total_sales
+        combined["Discount Value"] = discount_val
+        combined["Discounted Orders"] = disc_orders
+        combined["Revenue per Delivered"] = rpd
+        combined["Attribution Window End"] = grp["Attribution Window End"].max()
+        combined["is_final_snapshot"] = grp["is_final_snapshot"].all()
+        combined["_ab_grouped_from"] = " | ".join(sorted(names))
+        merged_rows.append(combined)
+
+    merged_df = pd.DataFrame(merged_rows)
+    for col in ["_group_key"]:
+        if col in merged_df.columns:
+            merged_df.drop(columns=[col], inplace=True)
+
+    result = pd.concat([no_code, non_ab, merged_df], ignore_index=True)
+    if not result.empty:
+        result.sort_values(
+            ["Parsed Send Date", "Campaign Name"], ascending=[False, True], inplace=True,
+        )
+        result.reset_index(drop=True, inplace=True)
     return result
 
 
