@@ -35,13 +35,21 @@ _REGION_COL_MAP = {
 
 
 def _norm(value) -> str:
-    """Lowercase + collapse whitespace + strip curly/straight quotes."""
+    """Lowercase + normalise punctuation + collapse whitespace.
+
+    Applied to both map keys (during load) and lookup values (during resolve),
+    so it must be consistent on both sides.
+    Changes: strip apostrophes/curly quotes, normalise slash spacing,
+    strip parentheses and commas, collapse whitespace.
+    """
     if value is None:
         return ""
     s = str(value).strip()
     s = re.sub(r"[''`]", "", s)          # strip apostrophes/curly quotes
+    s = re.sub(r"\s*/\s*", "/", s)       # "a / b" -> "a/b"
+    s = re.sub(r"[(),]", "", s)          # strip parens and commas
     s = re.sub(r"\s+", " ", s)           # collapse internal whitespace
-    return s.lower()
+    return s.lower().strip()
 
 
 def _split_codes(raw) -> list[str]:
