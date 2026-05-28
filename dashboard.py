@@ -50,6 +50,7 @@ from src.producer_mapping import (
     load_offer_type_mapping,
     load_tier_mapping,
     load_region_mapping,
+    resolve_producer,
 )
 
 
@@ -739,6 +740,7 @@ def run_pipeline() -> dict:
         "producer_current_df": producer_current_df,
         "producer_final_df": producer_final_df,
         "producer_analytics": producer_analytics,
+        "producer_map": producer_map,
         "excluded_df": excluded_df,
         "unmatched_df": unmatched_df,
         "qa_summary": qa_summary,
@@ -1156,8 +1158,14 @@ with tab_weekly:
                 / details_df["Delivered"].replace(0, float("nan"))
             )
 
+        # Add Producer column by resolving discount codes
+        _wk_producer_map = data.get("producer_map", {})
+        details_df["Producer"] = details_df["Discount Code"].apply(
+            lambda c: resolve_producer(c, _wk_producer_map) or ""
+        )
+
         display_cols = [
-            "Parsed Send Date", "Discount Code", "Campaign Name",
+            "Parsed Send Date", "Producer", "Discount Code", "Campaign Name",
             "Discounted Orders", "Delivered", "Attributed Revenue",
             "Total Sales", "Revenue per Delivered", "Sales per Delivered",
         ]
@@ -1166,6 +1174,7 @@ with tab_weekly:
             details_df[available],
             column_config={
                 "Parsed Send Date": st.column_config.DateColumn("Send Date", width="small"),
+                "Producer": st.column_config.TextColumn("Producer", width="medium"),
                 "Campaign Name": st.column_config.TextColumn("Campaign", width="large"),
                 "Discount Code": st.column_config.TextColumn("Code", width="medium"),
                 "Attributed Revenue": st.column_config.NumberColumn("Attr. Revenue", format="$%.2f"),
