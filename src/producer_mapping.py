@@ -52,11 +52,25 @@ def _norm(value) -> str:
     return s.lower().strip()
 
 
+def _norm_code(code) -> str:
+    """Normalise a discount code for map keys / lookups.
+
+    Lowercases and strips ALL whitespace (including internal). Shopify discount
+    codes never contain whitespace, but humans editing the mapping sheet often
+    write them in a more readable form (e.g. ``Haut Lafitte`` instead of
+    ``HautLafitte``). Normalising both sides means either form resolves to the
+    same key.
+    """
+    if code is None:
+        return ""
+    return re.sub(r"\s+", "", str(code)).lower()
+
+
 def _split_codes(raw) -> list[str]:
-    """Split a comma-separated codes cell into individual lowercased codes."""
+    """Split a comma-separated codes cell into individual normalised codes."""
     if not raw or (isinstance(raw, float)):
         return []
-    return [c.strip().lower() for c in str(raw).split(",") if c.strip()]
+    return [_norm_code(c) for c in str(raw).split(",") if c.strip()]
 
 
 def load_producer_mapping(excel_path: str) -> dict[str, str]:
@@ -170,10 +184,13 @@ def resolve_producer(
     Resolve a discount_code to a producer name.
     Returns None if the code is not in the mapping.
     The code 'None' (string) always returns None.
+
+    Whitespace-insensitive: ``HautLafitte`` and ``Haut Lafitte`` both look up the
+    same key.
     """
     if not discount_code or discount_code == "None":
         return None
-    return producer_map.get(discount_code.lower())
+    return producer_map.get(_norm_code(discount_code))
 
 
 def get_offer_type(
@@ -183,7 +200,7 @@ def get_offer_type(
     """Return offer type for a code, defaulting to 'standalone producer'."""
     if not discount_code or discount_code == "None":
         return "standalone producer"
-    return offer_type_map.get(discount_code.lower(), "standalone producer")
+    return offer_type_map.get(_norm_code(discount_code), "standalone producer")
 
 
 def resolve_tier(producer_name: str, tier_map: dict[str, str]) -> str:
