@@ -36,6 +36,19 @@ These definitions are final and must not be changed without explicit business ap
 
 This distinction MUST be preserved in all outputs: CSV, Excel, JSON, and report views.
 
+### 1.4 UTM-Influenced Metrics (Secondary Attribution — added 2026-07-28)
+
+Orders driven by a campaign email whose buyer did NOT use the campaign code
+(e.g. checked out with the generic `GrandCru` code). Detected via the order's
+`landing_site` URL. **Reported in separate columns — never blended into the
+locked primary metrics above.** Same null-vs-zero semantics apply.
+
+| Metric | Definition | Formula | Null Condition |
+|---|---|---|---|
+| **Influenced Orders** | Orders in the window whose `landing_site` matches the campaign but that used no campaign code. | `COUNT(influenced_orders)` | `null` if Code = None, EDU, or CONTENT |
+| **Influenced Offer Revenue** | Revenue from the offered wine's line items only, net of any discounts applied to those lines. Line match: every non-year token of the campaign's Producer/Topic appears in the line title, and at least one vintage year matches when the topic names vintages. | `SUM(line.price × qty − line discount allocations)` over matching lines | `null` if Code = None, EDU, or CONTENT |
+| **Influenced Total Sales** | Full order value of influenced orders (analog of Total Order Value). | `SUM(order.total_price)` | `null` if Code = None, EDU, or CONTENT |
+
 ---
 
 ## 2. Line-Item Attribution Logic
@@ -191,6 +204,28 @@ If the same code appears in multiple campaigns with overlapping windows:
 ### 5.4 Single Attribution Only
 
 Each order is attributed to exactly one campaign (the one whose code matches). No multi-campaign attribution. No splitting.
+
+### 5.5 UTM-Influenced Secondary Match (added 2026-07-28)
+
+Runs only for orders that did NOT match any campaign by code. An order is
+**influenced** by a campaign IF, within the campaign's attribution window:
+
+```
+UTM MATCH (either signal suffices):
+    order.landing_site contains path "/discount/<campaign_code>"   (case-insensitive)
+    OR the last " - " segment of the utm_campaign query value,
+       after stripping "Version A/B" / "V1/V2" suffixes, equals campaign_code
+
+AND EXCLUSION:
+    the order used NO known campaign discount code or automatic discount
+    title (checked against all campaign codes + family member identifiers,
+    normalized). Orders converting through another campaign's code are never
+    counted as influenced — single attribution is preserved.
+```
+
+- An order code-attributed to the same campaign is counted once in primary metrics only.
+- Family (BIN Sale) campaigns do not compute influenced metrics — their automatic discounts apply to every qualifying order, so code/title attribution already captures email-driven orders.
+- Known limitation: `landing_site` records only the first session; cross-device conversions are missed. Influenced metrics are a floor, not a ceiling.
 
 ---
 

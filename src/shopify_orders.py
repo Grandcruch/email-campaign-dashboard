@@ -7,6 +7,7 @@ Supports two matching modes:
    like BIN Sale where discount_codes[] is empty)
 """
 
+import re
 from datetime import date, timedelta
 from dataclasses import dataclass, field
 
@@ -51,6 +52,101 @@ class CampaignAttribution:
     total_order_subtotal: float = 0.0   # sum of current_subtotal_price across matched orders
     discounted_orders: int = 0
     matched_orders: list[OrderAttribution] = field(default_factory=list)
+    # UTM-influenced (secondary attribution): orders whose landing_site shows
+    # they arrived via this campaign's email but did NOT use the campaign code.
+    # Kept separate from the code-attributed metrics above — never blended.
+    influenced_orders: int = 0
+    influenced_offer_revenue: float = 0.0   # offer-wine lines only, net of any discounts applied
+    influenced_total_sales: float = 0.0     # full order.total_price of influenced orders
+    influenced_order_names: list[str] = field(default_factory=list)
+
+
+# ─── UTM-influenced matching helpers ─────────────────────────────────────────
+
+_DISCOUNT_PATH_RE = re.compile(r"/discount/([^/?&#]+)", re.IGNORECASE)
+_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+_AB_SUFFIX_RE = re.compile(r"\s*(version\s+[ab]|v[12])\s*$", re.IGNORECASE)
+
+
+def _order_utm_matches(order: dict, campaign_code: str) -> bool:
+    """
+    True if the order's landing_site shows the buyer arrived via this
+    campaign's email link. Two signals, either suffices:
+      1. /discount/<code> path — HubSpot emails link through the discount URL
+      2. utm_campaign ends with '- <code>' — campaign names embed the code
+         as their last ' - ' segment (A/B version suffixes stripped)
+    """
+    landing = order.get("landing_site") or ""
+    if not landing:
+        return False
+    norm_code = _normalize_code(campaign_code).replace(" ", "")
+
+    m = _DISCOUNT_PATH_RE.search(landing)
+    if m:
+        path_code = _normalize_code(m.group(1)).replace(" ", "").replace("%20", "")
+        if path_code == norm_code:
+            return True
+
+    m = re.search(r"utm_campaign=([^&]*)", landing, re.IGNORECASE)
+    if m:
+        utm_value = m.group(1).replace("%20", " ").strip()
+        last_segment = utm_value.split(" - ")[-1].strip()
+        last_segment = _AB_SUFFIX_RE.sub("", last_segment)
+        if _normalize_code(last_segment).replace(" ", "") == norm_code:
+            return True
+
+    return False
+
+
+def _order_uses_campaign_identifier(order: dict, identifiers: set[str]) -> bool:
+    """
+    True if the order used ANY known campaign discount code or automatic
+    discount title. Used to preserve single attribution: an order that
+    converted through another campaign's code is never counted as
+    UTM-influenced for this one.
+    """
+    for dc in order.get("discount_codes", []):
+        if _normalize_code(dc.get("code", "")) in identifiers:
+            return True
+    for app in order.get("discount_applications", []):
+        if _normalize_code(app.get("title") or "") in identifiers:
+            return True
+    return False
+
+
+def _tokenize_wine(text: str) -> set[str]:
+    """Lowercase, strip apostrophes/punctuation, split into tokens."""
+    text = text.replace("'", "").replace("’", "").lower()
+    return set(re.split(r"[^a-z0-9]+", text)) - {""}
+
+
+def _offer_line_revenue(order: dict, producer_topic: str) -> float:
+    """
+    Sum revenue of line items matching the campaign's offered wine
+    (net of whatever discounts were applied to those lines).
+
+    A line matches when every non-year token of producer_topic appears in
+    the line title, and (if the topic names vintages) at least one vintage
+    year also appears in the title.
+    """
+    if not producer_topic:
+        return 0.0
+    topic_tokens = _tokenize_wine(producer_topic)
+    topic_years = {t for t in topic_tokens if _YEAR_RE.fullmatch(t)}
+    topic_words = topic_tokens - topic_years
+
+    total = 0.0
+    for item in order.get("line_items", []):
+        title = item.get("title", "")
+        title_tokens = _tokenize_wine(title)
+        if topic_words and not topic_words <= title_tokens:
+            continue
+        if topic_years and not (topic_years & title_tokens):
+            continue
+        gross = float(item.get("price", 0)) * int(item.get("quantity", 1))
+        allocs = sum(float(a.get("amount", 0)) for a in item.get("discount_allocations", []))
+        total += gross - allocs
+    return total
 
 
 def _fetch_orders_in_window(
@@ -227,10 +323,26 @@ def compute_attribution(
     discount_code: str,
     send_date: date,
     window_days: int,
+    producer_topic: str = "",
+    all_campaign_identifiers: set[str] | None = None,
 ) -> CampaignAttribution:
     """
     Fetch orders in the attribution window and compute aggregated metrics
     for a single discount code (standard matching by discount_codes[].code).
+
+    Also computes UTM-influenced metrics (secondary attribution): orders whose
+    landing_site proves they arrived via this campaign's email but that checked
+    out without the campaign code (e.g. used the generic GrandCru code instead).
+    Influenced orders are counted only if they did not convert through ANY
+    known campaign code/title (single attribution preserved). Kept in separate
+    fields — never blended into the code-attributed metrics.
+
+    Parameters:
+        producer_topic: the campaign's Producer/Topic segment (e.g.
+            "2009 Clos Fourtet") used to isolate offer-wine line revenue on
+            influenced orders. Empty string disables offer-line matching.
+        all_campaign_identifiers: normalized codes/titles of ALL campaigns,
+            used to exclude orders already attributed elsewhere by code.
     """
     end_date = send_date + timedelta(days=window_days)
     orders = _fetch_orders_in_window(auth, send_date, end_date)
@@ -239,14 +351,25 @@ def compute_attribution(
 
     for order in orders:
         attr = _attribute_order(order, discount_code)
-        if attr is None:
+        if attr is not None:
+            result.attributed_revenue += attr.attributed_revenue
+            result.discount_value += attr.discount_value
+            result.total_order_value += attr.order_total_price
+            result.total_order_subtotal += attr.order_subtotal
+            result.discounted_orders += 1
+            result.matched_orders.append(attr)
             continue
-        result.attributed_revenue += attr.attributed_revenue
-        result.discount_value += attr.discount_value
-        result.total_order_value += attr.order_total_price
-        result.total_order_subtotal += attr.order_subtotal
-        result.discounted_orders += 1
-        result.matched_orders.append(attr)
+
+        # UTM-influenced fallback: email drove the visit, code wasn't used.
+        if not _order_utm_matches(order, discount_code):
+            continue
+        if all_campaign_identifiers and _order_uses_campaign_identifier(
+                order, all_campaign_identifiers):
+            continue  # converted via another campaign's code — not ours
+        result.influenced_orders += 1
+        result.influenced_total_sales += float(order.get("total_price", 0))
+        result.influenced_offer_revenue += _offer_line_revenue(order, producer_topic)
+        result.influenced_order_names.append(order.get("name", ""))
 
     return result
 

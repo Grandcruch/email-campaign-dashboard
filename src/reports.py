@@ -52,6 +52,11 @@ class DashboardRow:
     total_order_subtotal: float | None = None  # current_subtotal_price sum (merch net of discounts, excl tax/shipping)
     discounted_orders: int | None = None
     revenue_per_delivered: float | None = None
+    # UTM-influenced (secondary attribution) — same null-vs-zero semantics:
+    # None = not attempted (EDU/CONTENT/no code), 0 = attempted with no matches
+    influenced_orders: int | None = None
+    influenced_offer_revenue: float | None = None
+    influenced_total_sales: float | None = None
     # Metadata
     is_final_snapshot: bool = False
     is_family_key: bool = False
@@ -114,6 +119,9 @@ def assemble_dashboard_rows(
             row.total_order_subtotal = None
             row.discounted_orders = None
             row.revenue_per_delivered = None
+            row.influenced_orders = None
+            row.influenced_offer_revenue = None
+            row.influenced_total_sales = None
         else:
             # Look up by compound key "code|send_date" first (supports
             # multiple campaigns sharing the same code with different windows).
@@ -143,6 +151,19 @@ def assemble_dashboard_rows(
                 if p.qa_bucket == "OK":
                     row.qa_bucket = "OK_NO_ORDERS"
                     p.qa_bucket = "OK_NO_ORDERS"
+
+            # UTM-influenced metrics — populated whenever attribution ran,
+            # independent of whether any code-attributed orders were found
+            if attr is not None:
+                row.influenced_orders = getattr(attr, "influenced_orders", 0)
+                row.influenced_offer_revenue = round(
+                    getattr(attr, "influenced_offer_revenue", 0.0), 2)
+                row.influenced_total_sales = round(
+                    getattr(attr, "influenced_total_sales", 0.0), 2)
+            else:
+                row.influenced_orders = 0
+                row.influenced_offer_revenue = 0.0
+                row.influenced_total_sales = 0.0
 
         # WINDOW_OPEN check
         if not row.is_final_snapshot and row.qa_bucket in ("OK", "OK_OVERRIDE"):
@@ -177,6 +198,9 @@ def rows_to_dataframe(rows: list[DashboardRow]) -> pd.DataFrame:
             "Order Subtotal": r.total_order_subtotal,
             "Discounted Orders": r.discounted_orders,
             "Revenue per Delivered": r.revenue_per_delivered,
+            "Influenced Orders": r.influenced_orders,
+            "Influenced Offer Revenue": r.influenced_offer_revenue,
+            "Influenced Total Sales": r.influenced_total_sales,
             "Attribution Window Days": r.attribution_window_days,
             "Attribution Window End": r.attribution_window_end,
             "is_final_snapshot": r.is_final_snapshot,
@@ -482,6 +506,7 @@ def generate_weekly_report(df: pd.DataFrame, run_date: date) -> pd.DataFrame:
         "Parsed Send Date", "Discount Code", "Campaign Name",
         "Discounted Orders", "Delivered", "Attributed Revenue",
         "Total Sales", "Revenue per Delivered",
+        "Influenced Orders", "Influenced Offer Revenue", "Influenced Total Sales",
     ]
     available = [c for c in cols if c in df.columns]
     weekly = df[available].copy()
@@ -1074,6 +1099,7 @@ HISTORY_COLUMNS = [
     "Attribution Window Days", "Delivered", "Opened", "Clicked",
     "Attributed Revenue", "Discount Value", "Total Sales",
     "Discounted Orders", "Revenue per Delivered",
+    "Influenced Orders", "Influenced Offer Revenue", "Influenced Total Sales",
     "is_final_snapshot", "Run Date", "Attribution Window End",
     "QA Bucket", "HubSpot v3 Email ID", "HubSpot v1 Campaign ID",
 ]

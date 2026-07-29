@@ -27,7 +27,12 @@ from src.config import load_env, DATA_START_DATE, OUTPUT_DIR
 from src.auth import ShopifyAuth, hubspot_headers
 from src.hubspot import fetch_campaigns
 from src.overrides import load_overrides, apply_overrides
-from src.shopify_orders import compute_attribution, compute_family_attribution, fetch_all_discount_codes_in_range
+from src.shopify_orders import (
+    compute_attribution,
+    compute_family_attribution,
+    fetch_all_discount_codes_in_range,
+    _normalize_code as _normalize_discount_code,
+)
 from src.families import load_family_mapping, is_family_key, get_family_identifiers
 from src.reports import (
     assemble_dashboard_rows,
@@ -620,7 +625,21 @@ def run_pipeline() -> dict:
                         p.discount_code,
                         p.parsed_send_date,
                         p.attribution_window_days,
+                        p.producer_topic or "",
                     ))
+
+        # All campaign codes/titles (normalized) — used by the UTM-influenced
+        # pass to preserve single attribution across campaigns.
+        all_campaign_identifiers: set[str] = set()
+        for rec in main_records:
+            p = rec.parsed
+            if not p.discount_code:
+                continue
+            if p.is_family_key:
+                for m in get_family_identifiers(p.discount_code, families):
+                    all_campaign_identifiers.add(_normalize_discount_code(m.identifier))
+            else:
+                all_campaign_identifiers.add(_normalize_discount_code(p.discount_code))
 
         # Attribution dict is keyed by "code|send_date" so each campaign
         # gets its own attribution result for its own window, even if
@@ -629,14 +648,18 @@ def run_pipeline() -> dict:
 
         # Standard code attribution
         attribution_failures: list[tuple[str, str]] = []
-        for code, send_date, window in attribution_tasks:
+        for code, send_date, window, producer_topic in attribution_tasks:
             dedup_key = f"{code.lower()}|{send_date}|{window}"
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
             status.update(label=f"Attributing: {code}...")
             try:
-                attr = compute_attribution(shopify_auth, code, send_date, window)
+                attr = compute_attribution(
+                    shopify_auth, code, send_date, window,
+                    producer_topic=producer_topic,
+                    all_campaign_identifiers=all_campaign_identifiers,
+                )
             except Exception as exc:
                 attribution_failures.append((f"{code} @ {send_date}", str(exc)))
                 continue
@@ -930,11 +953,12 @@ _producer_current_df, _producer_final_df = generate_producer_report(display_df)
 
 # ─── Tabs ────────────────────────────────────────────────────────────────────
 
-tab_weekly, tab_monthly, tab_producer, tab_qa = st.tabs([
+tab_weekly, tab_monthly, tab_producer, tab_qa, tab_method = st.tabs([
     "Weekly",
     "Monthly",
     "Producers",
     "QA",
+    "Methodology",
 ])
 
 
@@ -1022,6 +1046,15 @@ with tab_weekly:
             kpis.append({"label": "Total Sales", "value": f"${coded_week['Total Sales'].sum():,.2f}",
                          "sub": "Full matched orders"})
             kpis.append({"label": "Orders", "value": f"{coded_week['Discounted Orders'].dropna().sum():.0f}"})
+            if "Influenced Total Sales" in coded_week.columns:
+                _inf_sales = coded_week["Influenced Total Sales"].dropna().sum()
+                _inf_orders = coded_week["Influenced Orders"].dropna().sum()
+                if _inf_orders > 0:
+                    kpis.append({
+                        "label": "Influenced Sales",
+                        "value": f"${_inf_sales:,.2f}",
+                        "sub": f"{_inf_orders:.0f} email-driven orders w/o code",
+                    })
         render_kpi_row(kpis)
 
         spacer("lg")
@@ -1168,6 +1201,7 @@ with tab_weekly:
             "Parsed Send Date", "Producer", "Discount Code", "Campaign Name",
             "Discounted Orders", "Delivered", "Attributed Revenue",
             "Total Sales", "Revenue per Delivered", "Sales per Delivered",
+            "Influenced Orders", "Influenced Offer Revenue", "Influenced Total Sales",
         ]
         available = [c for c in display_cols if c in details_df.columns]
         st.dataframe(
@@ -1181,6 +1215,14 @@ with tab_weekly:
                 "Total Sales": st.column_config.NumberColumn("Total Sales", format="$%.2f"),
                 "Revenue per Delivered": st.column_config.NumberColumn("Rev/Delivered", format="$%.4f"),
                 "Sales per Delivered": st.column_config.NumberColumn("Sales/Delivered", format="$%.4f"),
+                "Influenced Orders": st.column_config.NumberColumn(
+                    "Infl. Orders", help="Email-driven orders that did not use the campaign code (UTM-matched)"),
+                "Influenced Offer Revenue": st.column_config.NumberColumn(
+                    "Infl. Offer Rev", format="$%.2f",
+                    help="Revenue from the offered wine's line items on influenced orders"),
+                "Influenced Total Sales": st.column_config.NumberColumn(
+                    "Infl. Total Sales", format="$%.2f",
+                    help="Full order value of influenced orders"),
             },
             use_container_width=True,
             hide_index=True,
@@ -1665,3 +1707,100 @@ with tab_qa:
     # ── QA Summary ───────────────────────────────────────────────────────
     with st.expander("Full QA Summary", expanded=False):
         st.code(data["qa_summary"], language=None)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tab 5: Methodology — how every metric is computed
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with tab_method:
+    section_title(
+        "Methodology",
+        "How campaigns are matched to Shopify orders and what each metric means",
+    )
+
+    st.markdown("""
+#### Data sources
+
+| Source | What it provides |
+|---|---|
+| **HubSpot** | Campaign name, send date, and delivery stats (Delivered, Opened, Clicked). A campaign counts as "sent" only if HubSpot reports at least 1 delivery. |
+| **Shopify** | Orders — including line items, discount codes applied, and the landing page URL that started the buyer's session. |
+| **Mapping spreadsheets** | Producer, offer type, tier, and region for each discount code (maintained manually in Excel). |
+
+#### Campaign naming convention
+
+Every campaign name follows: `YYYY-MM-DD - Producer/Topic - Type - OfferValue - Code`
+
+- **Type** is one of `PROD` (sellable offer), `EDU` (educational), or `CONTENT`.
+- Only **PROD campaigns with a real discount code** are matched to Shopify orders. EDU/CONTENT campaigns show delivery stats only.
+- A/B test versions of the same campaign (same code, same send date) are automatically **merged into one row** — delivery stats are summed, and the shared Shopify attribution is counted once.
+
+#### Attribution window
+
+Orders are matched to a campaign if they were created within **7 days** of the send date (**3 days** for BIN Sale / holiday / flash campaigns). A campaign is **Finalized** once its window has closed — finalized numbers never change afterward.
+""")
+
+    spacer("md")
+    section_title("Primary attribution — discount code", "The buyer used the campaign's code at checkout")
+
+    st.markdown("""
+An order belongs to a campaign when the campaign's **discount code appears on the order**. Within a matched order, only the line items that the code was applied to count toward Attributed Revenue.
+
+| Metric | Definition |
+|---|---|
+| **Attributed Revenue** | For each discounted line item: `price × quantity − discount amount`. Net revenue of the wines the code was applied to. |
+| **Discount Value** | Total dollar discount given on those line items. |
+| **Total Sales** | Full order value (`total_price`) of every matched order — includes non-discounted items in the same cart, tax, and shipping. |
+| **Discounted Orders** | Number of orders that used the code. |
+| **Revenue per Delivered** | Attributed Revenue ÷ Delivered. The efficiency yardstick across campaigns. |
+| **Sales per Delivered** | Total Sales ÷ Delivered. |
+
+**BIN Sale campaigns** apply automatic discounts (e.g. `BinSale10` + `BinSale12`) instead of typed codes, so they're matched by discount *title* across the whole family and de-duplicated so no order is counted twice.
+
+**Single attribution:** each order is credited to exactly **one** campaign.
+""")
+
+    spacer("md")
+    section_title("Secondary attribution — UTM-influenced", "The email drove the visit, but the code wasn't used")
+
+    st.markdown("""
+Some buyers click a campaign email, land on the store, and complete a purchase **without using the campaign code** — for example, checking out with the generic `GrandCru` loyalty code instead. Code-based attribution alone misses these orders.
+
+Shopify records the **first page of each buyer's session** (`landing_site`), and HubSpot email links carry two fingerprints in that URL:
+
+1. The **`/discount/<Code>` path** — email links route through the campaign's own discount URL
+2. The **`utm_campaign` parameter** — contains the full campaign name
+
+An order counts as **Influenced** when, inside the campaign's attribution window:
+
+- its landing URL matches the campaign by either fingerprint, **and**
+- it was **not** already attributed to any campaign by code (single attribution is preserved — an order that used another campaign's code is never double-counted).
+
+| Metric | Definition |
+|---|---|
+| **Influenced Orders** | Orders matching the rules above. |
+| **Influenced Offer Revenue** | Revenue from **the offered wine's line items only** on those orders (net of any discounts applied). E.g. an influenced order containing \\$473 of the offered wine plus \\$1,500 of other wine contributes \\$473 here. |
+| **Influenced Total Sales** | Full order value of influenced orders — the analog of Total Sales. |
+
+**These metrics are reported separately and never blended into Attributed Revenue.** Code usage is proof of conversion; a UTM match is strong evidence. Keeping them apart preserves comparability with all historical reporting.
+
+**Known limitations:**
+- `landing_site` only captures the **first session**. A buyer who clicks the email on their phone but orders later from a laptop won't be captured — Influenced numbers are a *floor*, not a ceiling.
+- Offer-wine line matching compares the campaign's Producer/Topic text against Shopify product titles; unusual naming mismatches can miss a line (the order still counts in Influenced Total Sales).
+""")
+
+    spacer("md")
+    section_title("Reading the numbers", "Null vs. zero, and other conventions")
+
+    st.markdown("""
+| Value | Meaning |
+|---|---|
+| **blank / null** | Attribution was **not attempted** — EDU or CONTENT campaign, or no discount code. |
+| **0** | Attribution **was attempted** and no matching orders were found. |
+| **> 0** | Normal attributed result. |
+
+- Campaigns with fewer than **50 deliveries** are excluded from efficiency rankings.
+- The **Producers tab** only includes finalized campaigns, resolves each discount code to a producer via the mapping spreadsheet, and excludes non-producer buckets (BIN Sale, Holiday, etc.) from producer rankings.
+- History rows for finalized campaigns are **frozen** — later pipeline runs never overwrite them.
+""")

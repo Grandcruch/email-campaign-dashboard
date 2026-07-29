@@ -95,20 +95,39 @@ def run_export():
                     p.discount_code,
                     p.parsed_send_date,
                     p.attribution_window_days,
+                    p.producer_topic or "",
                 ))
+
+    # All campaign codes/titles (normalized) — used by the UTM-influenced
+    # pass to preserve single attribution across campaigns.
+    from src.shopify_orders import _normalize_code
+    all_campaign_identifiers: set[str] = set()
+    for rec in main_records:
+        p = rec.parsed
+        if not p.discount_code:
+            continue
+        if p.is_family_key:
+            for m in get_family_identifiers(p.discount_code, families):
+                all_campaign_identifiers.add(_normalize_code(m.identifier))
+        else:
+            all_campaign_identifiers.add(_normalize_code(p.discount_code))
 
     seen = set()
 
     # Standard code attribution
     attribution_failures: list[str] = []
-    for code, send_date, window in attribution_tasks:
+    for code, send_date, window, producer_topic in attribution_tasks:
         dedup_key = f"{code.lower()}|{send_date}|{window}"
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
         print(f"  Attributing: {code} (window: {send_date} + {window}d)...")
         try:
-            attr = compute_attribution(shopify_auth, code, send_date, window)
+            attr = compute_attribution(
+                shopify_auth, code, send_date, window,
+                producer_topic=producer_topic,
+                all_campaign_identifiers=all_campaign_identifiers,
+            )
         except Exception as exc:
             print(f"    SKIPPED ({type(exc).__name__}): {exc}")
             attribution_failures.append(f"{code} @ {send_date}")
