@@ -764,6 +764,7 @@ def run_pipeline() -> dict:
         "producer_final_df": producer_final_df,
         "producer_analytics": producer_analytics,
         "producer_map": producer_map,
+        "attribution_failures": attribution_failures,
         "excluded_df": excluded_df,
         "unmatched_df": unmatched_df,
         "qa_summary": qa_summary,
@@ -854,6 +855,19 @@ if "data" not in st.session_state:
 data = st.session_state["data"]
 run_date = data["run_date"]
 full_df = data["df"]
+
+# Persistent alert: if any campaigns were skipped due to Shopify errors during
+# the pipeline run, their metrics show as $0. This banner survives reruns
+# (unlike the in-run warning) so the failure state is never invisible.
+_attr_failures = data.get("attribution_failures") or []
+if _attr_failures:
+    st.error(
+        f"⚠️ **{len(_attr_failures)} campaign(s) could not be attributed** during the "
+        f"last data load (Shopify errors) — their revenue shows as $0 even though "
+        f"orders may exist. Click **Refresh Data** in the sidebar to re-run.\n\n"
+        + "\n".join(f"- {label}" for label, _msg in _attr_failures[:15])
+        + ("\n- …" if len(_attr_failures) > 15 else "")
+    )
 
 
 # ─── Page Header ─────────────────────────────────────────────────────────────
