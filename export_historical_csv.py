@@ -27,7 +27,7 @@ from src.config import load_env, DATA_START_DATE, OUTPUT_DIR
 from src.auth import ShopifyAuth, hubspot_headers
 from src.hubspot import fetch_campaigns
 from src.overrides import load_overrides, apply_overrides
-from src.shopify_orders import compute_attribution, compute_family_attribution
+from src.shopify_orders import compute_attribution, compute_family_attribution, _fetch_orders_in_window
 from src.families import load_family_mapping, is_family_key, get_family_identifiers
 from src.reports import assemble_dashboard_rows, rows_to_dataframe, apply_ab_grouping
 
@@ -112,6 +112,12 @@ def run_export():
         else:
             all_campaign_identifiers.add(_normalize_code(p.discount_code))
 
+    # Bulk-fetch ALL orders once; each campaign filters its window in-memory.
+    from src.config import DATA_START_DATE
+    print(f"  Bulk-fetching all Shopify orders {DATA_START_DATE} -> {run_date}...")
+    all_orders = _fetch_orders_in_window(shopify_auth, DATA_START_DATE, run_date)
+    print(f"  {len(all_orders)} orders fetched")
+
     seen = set()
 
     # Standard code attribution
@@ -127,6 +133,7 @@ def run_export():
                 shopify_auth, code, send_date, window,
                 producer_topic=producer_topic,
                 all_campaign_identifiers=all_campaign_identifiers,
+                orders=all_orders,
             )
         except Exception as exc:
             print(f"    SKIPPED ({type(exc).__name__}): {exc}")
@@ -147,6 +154,7 @@ def run_export():
         try:
             attr = compute_family_attribution(
                 shopify_auth, family_key, title_ids, send_date, window,
+                orders=all_orders,
             )
         except Exception as exc:
             print(f"    SKIPPED ({type(exc).__name__}): {exc}")

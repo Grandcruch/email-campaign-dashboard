@@ -32,6 +32,7 @@ from src.shopify_orders import (
     compute_family_attribution,
     fetch_all_discount_codes_in_range,
     _normalize_code as _normalize_discount_code,
+    _fetch_orders_in_window as _fetch_all_shopify_orders,
 )
 from src.families import load_family_mapping, is_family_key, get_family_identifiers
 from src.reports import (
@@ -646,6 +647,12 @@ def run_pipeline() -> dict:
             else:
                 all_campaign_identifiers.add(_normalize_discount_code(p.discount_code))
 
+        # Bulk-fetch ALL orders once; each campaign filters its window
+        # in-memory. Cuts hundreds of overlapping per-window Shopify
+        # fetches down to one paginated pass.
+        status.update(label="Bulk-fetching all Shopify orders...")
+        all_orders = _fetch_all_shopify_orders(shopify_auth, DATA_START_DATE, run_date)
+
         # Attribution dict is keyed by "code|send_date" so each campaign
         # gets its own attribution result for its own window, even if
         # multiple campaigns share the same discount code / family key.
@@ -664,6 +671,7 @@ def run_pipeline() -> dict:
                     shopify_auth, code, send_date, window,
                     producer_topic=producer_topic,
                     all_campaign_identifiers=all_campaign_identifiers,
+                    orders=all_orders,
                 )
             except Exception as exc:
                 attribution_failures.append((f"{code} @ {send_date}", str(exc)))
@@ -683,6 +691,7 @@ def run_pipeline() -> dict:
             try:
                 attr = compute_family_attribution(
                     shopify_auth, family_key, title_ids, send_date, window,
+                    orders=all_orders,
                 )
             except Exception as exc:
                 attribution_failures.append((f"{family_key} @ {send_date}", str(exc)))
@@ -726,7 +735,8 @@ def run_pipeline() -> dict:
         status.update(label="Fetching Shopify orders for unmatched-code analysis...")
         excluded_df = generate_excluded_campaigns(records)
         shopify_code_map = fetch_all_discount_codes_in_range(
-            shopify_auth, DATA_START_DATE, run_date + timedelta(days=1)
+            shopify_auth, DATA_START_DATE, run_date + timedelta(days=1),
+            orders=all_orders,
         )
         campaign_codes = {
             r.parsed.discount_code.lower()

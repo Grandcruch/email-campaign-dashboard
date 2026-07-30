@@ -101,6 +101,8 @@ def fetch_campaigns(token: str) -> list[CampaignRecord]:
     """
     raw_emails = _fetch_v3_emails(token)
     records: list[CampaignRecord] = []
+    # Records whose v1 stats still need resolving: (record, allEmailCampaignIds)
+    pending: list[tuple[CampaignRecord, list]] = []
 
     for email in raw_emails:
         name = email.get("name", "")
@@ -123,40 +125,43 @@ def fetch_campaigns(token: str) -> list[CampaignRecord]:
             hubspot_v3_email_id=str(email.get("id", "")),
             subject=email.get("subject", ""),
         )
+        records.append(record)
 
-        # If parse failed (LEGACY_FORMAT, PARSE_ERROR), still add to records for QA
+        # If parse failed (LEGACY_FORMAT, PARSE_ERROR), no stats needed (QA only)
         if parsed.qa_bucket in ("PARSE_ERROR", "LEGACY_FORMAT"):
-            records.append(record)
             continue
 
-        # Resolve v1 stats
         all_ids = email.get("allEmailCampaignIds", [])
         if not all_ids:
             parsed.qa_bucket = "STATS_UNAVAILABLE"
-            records.append(record)
             continue
 
-        v1 = _resolve_v1_stats(token, all_ids)
-        if v1 is None:
-            parsed.qa_bucket = "STATS_UNAVAILABLE"
-            records.append(record)
-            continue
+        pending.append((record, all_ids))
 
-        # Populate stats
-        counters = v1["counters"]
-        record.hubspot_v1_campaign_id = v1["id"]
-        record.delivered = counters.get("delivered", 0)
-        record.opened = counters.get("open", 0)
-        record.clicked = counters.get("click", 0)
-        record.sent = counters.get("sent", 0)
-        record.bounced = counters.get("bounce", 0)
-        record.unsubscribed = counters.get("unsubscribed", 0)
+    # Resolve v1 stats in parallel. HubSpot private apps allow ~110 requests
+    # per 10s; 8 workers with ~1 request each per email stays well under.
+    from concurrent.futures import ThreadPoolExecutor
 
-        # Final check: delivered > 0 is the primary sent check
-        if record.delivered == 0:
-            parsed.qa_bucket = "STATS_UNAVAILABLE"
+    def _resolve_one(item):
+        record, all_ids = item
+        return record, _resolve_v1_stats(token, all_ids)
 
-        records.append(record)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for record, v1 in pool.map(_resolve_one, pending):
+            if v1 is None:
+                record.parsed.qa_bucket = "STATS_UNAVAILABLE"
+                continue
+            counters = v1["counters"]
+            record.hubspot_v1_campaign_id = v1["id"]
+            record.delivered = counters.get("delivered", 0)
+            record.opened = counters.get("open", 0)
+            record.clicked = counters.get("click", 0)
+            record.sent = counters.get("sent", 0)
+            record.bounced = counters.get("bounce", 0)
+            record.unsubscribed = counters.get("unsubscribed", 0)
+            # Final check: delivered > 0 is the primary sent check
+            if record.delivered == 0:
+                record.parsed.qa_bucket = "STATS_UNAVAILABLE"
 
     print(f"  [hubspot] {len(records)} campaigns in scope (>= {DATA_START_DATE})")
     return records

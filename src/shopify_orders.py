@@ -9,7 +9,7 @@ Supports two matching modes:
 
 import re
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass, field
 
 from .auth import ShopifyAuth
@@ -177,7 +177,9 @@ def _fetch_orders_in_window(
     """Fetch all Shopify orders in [start_date, end_date] (both inclusive) with pagination."""
     base_url = f"https://{auth.store_domain}/admin/api/{SHOPIFY_API_VERSION}/orders.json"
     all_orders: list[dict] = []
-    params = {
+    seen_ids: set[int] = set()
+    url = base_url
+    params: dict | None = {
         "status": "any",
         "created_at_min": f"{start_date.isoformat()}T00:00:00Z",
         "created_at_max": f"{(end_date + timedelta(days=1)).isoformat()}T10:00:00Z",
@@ -185,20 +187,48 @@ def _fetch_orders_in_window(
     }
 
     while True:
-        resp = _throttled_get(base_url, headers=auth.headers(), params=params)
+        resp = _throttled_get(url, headers=auth.headers(), params=params)
         resp.raise_for_status()
         data = resp.json()
-        orders = data.get("orders", [])
-        all_orders.extend(orders)
+        for order in data.get("orders", []):
+            oid = order.get("id")
+            if oid in seen_ids:
+                continue
+            seen_ids.add(oid)
+            all_orders.append(order)
 
-        if len(orders) < 250:
+        # Cursor pagination via the Link header. (since_id pagination is
+        # incompatible with date-filtered results and silently duplicated /
+        # truncated pages beyond 250 orders.)
+        link = resp.headers.get("Link", "") or resp.headers.get("link", "")
+        m = re.search(r'<([^>]+)>;\s*rel="next"', link)
+        if not m:
             break
-
-        # Paginate via since_id
-        last_id = orders[-1]["id"]
-        params["since_id"] = last_id
+        url = m.group(1)      # absolute URL carrying page_info cursor
+        params = None         # page_info URLs must not repeat filter params
 
     return all_orders
+
+
+def _order_in_window(order: dict, start_date: date, end_date: date) -> bool:
+    """
+    In-memory equivalent of the API window filter used by
+    _fetch_orders_in_window: created_at >= start 00:00:00Z and
+    created_at <= (end+1) 10:00:00Z. Must stay identical so bulk-fetched
+    attribution matches per-window fetching exactly.
+    """
+    created = order.get("created_at") or ""
+    try:
+        dt = datetime.fromisoformat(created)
+    except ValueError:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    lo = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
+    hi_d = end_date + timedelta(days=1)
+    hi = datetime(hi_d.year, hi_d.month, hi_d.day, 10, 0, 0, tzinfo=timezone.utc)
+    dt_utc = dt.astimezone(timezone.utc)
+    return lo <= dt_utc <= hi
 
 
 def _attribute_order(order: dict, campaign_code: str) -> OrderAttribution | None:
@@ -345,6 +375,7 @@ def compute_attribution(
     window_days: int,
     producer_topic: str = "",
     all_campaign_identifiers: set[str] | None = None,
+    orders: list[dict] | None = None,
 ) -> CampaignAttribution:
     """
     Fetch orders in the attribution window and compute aggregated metrics
@@ -363,9 +394,16 @@ def compute_attribution(
             influenced orders. Empty string disables offer-line matching.
         all_campaign_identifiers: normalized codes/titles of ALL campaigns,
             used to exclude orders already attributed elsewhere by code.
+        orders: optional pre-fetched order list covering the window. When
+            provided, the window is applied in-memory (identical bounds to
+            the API filter) and no Shopify request is made — callers fetch
+            the full order range once and reuse it for every campaign.
     """
     end_date = send_date + timedelta(days=window_days)
-    orders = _fetch_orders_in_window(auth, send_date, end_date)
+    if orders is None:
+        orders = _fetch_orders_in_window(auth, send_date, end_date)
+    else:
+        orders = [o for o in orders if _order_in_window(o, send_date, end_date)]
 
     result = CampaignAttribution(discount_code=discount_code)
 
@@ -400,6 +438,7 @@ def compute_family_attribution(
     title_identifiers: list[str],
     send_date: date,
     window_days: int,
+    orders: list[dict] | None = None,
 ) -> CampaignAttribution:
     """
     Fetch orders in the attribution window and compute aggregated metrics
@@ -415,9 +454,13 @@ def compute_family_attribution(
                           (e.g. ["BinSale10", "BinSale12"])
         send_date: campaign send date
         window_days: attribution window length
+        orders: optional pre-fetched order list (see compute_attribution)
     """
     end_date = send_date + timedelta(days=window_days)
-    orders = _fetch_orders_in_window(auth, send_date, end_date)
+    if orders is None:
+        orders = _fetch_orders_in_window(auth, send_date, end_date)
+    else:
+        orders = [o for o in orders if _order_in_window(o, send_date, end_date)]
 
     result = CampaignAttribution(discount_code=family_key)
 
@@ -458,6 +501,7 @@ def fetch_all_discount_codes_in_range(
     auth: ShopifyAuth,
     start_date: date,
     end_date: date,
+    orders: list[dict] | None = None,
 ) -> dict[str, list[dict]]:
     """
     Fetch ALL orders in a date range and return a dict mapping
@@ -466,8 +510,11 @@ def fetch_all_discount_codes_in_range(
 
     Includes both discount_codes[].code and discount_applications[].title
     to capture automatic discounts.
+
+    Pass a pre-fetched `orders` list to skip the Shopify fetch entirely.
     """
-    orders = _fetch_orders_in_window(auth, start_date, end_date)
+    if orders is None:
+        orders = _fetch_orders_in_window(auth, start_date, end_date)
     code_map: dict[str, list[dict]] = {}
 
     for order in orders:

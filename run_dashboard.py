@@ -124,6 +124,14 @@ def main():
 
     # Attribution dict keyed by "code|send_date" so each campaign gets
     # its own result for its own window.
+    # Bulk-fetch ALL orders once; each campaign filters its window in-memory.
+    # Cuts hundreds of overlapping per-window Shopify fetches down to one
+    # paginated pass (~20-30 requests total).
+    from src.shopify_orders import _fetch_orders_in_window
+    print(f"  Bulk-fetching all Shopify orders {DATA_START_DATE} -> {run_date}...")
+    all_orders = _fetch_orders_in_window(shopify_auth, DATA_START_DATE, run_date)
+    print(f"  {len(all_orders)} orders fetched")
+
     seen = set()
 
     # Standard code attribution
@@ -139,6 +147,7 @@ def main():
                 shopify_auth, code, send_date, window,
                 producer_topic=producer_topic,
                 all_campaign_identifiers=all_campaign_identifiers,
+                orders=all_orders,
             )
         except Exception as exc:
             print(f"    SKIPPED ({type(exc).__name__}): {exc}")
@@ -159,6 +168,7 @@ def main():
         try:
             attr = compute_family_attribution(
                 shopify_auth, family_key, title_ids, send_date, window,
+                orders=all_orders,
             )
         except Exception as exc:
             print(f"    SKIPPED ({type(exc).__name__}): {exc}")
@@ -201,7 +211,8 @@ def main():
     # Unmatched Shopify discount codes — fetch all orders in scope
     print("  Fetching all Shopify orders for unmatched-code analysis...")
     shopify_code_map = fetch_all_discount_codes_in_range(
-        shopify_auth, DATA_START_DATE, run_date + __import__("datetime").timedelta(days=1)
+        shopify_auth, DATA_START_DATE, run_date + __import__("datetime").timedelta(days=1),
+        orders=all_orders,
     )
     campaign_codes = {
         r.parsed.discount_code.lower()
