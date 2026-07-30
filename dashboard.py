@@ -566,10 +566,15 @@ def _generate_producer_insights(display_df: pd.DataFrame, view_label: str) -> st
 
 # ─── Pipeline runner ─────────────────────────────────────────────────────────
 
+@st.cache_resource(ttl=6 * 3600, show_spinner=False)
 def run_pipeline() -> dict:
     """
     Execute the full data pipeline (same logic as run_dashboard.py).
     Returns a dict of all computed artifacts for display.
+
+    Cached globally across sessions for 6 hours — only the first visitor
+    after a deploy (or after Refresh Data clears the cache) pays the
+    multi-minute pipeline cost; everyone else loads instantly.
     """
     run_date = date.today()
 
@@ -893,6 +898,7 @@ unmatched_df = data["unmatched_df"]
 
 with st.sidebar:
     if st.button("Refresh Data", type="primary", use_container_width=True):
+        run_pipeline.clear()  # clear the cross-session cache, not just this session
         st.session_state.pop("data", None)
         st.rerun()
 

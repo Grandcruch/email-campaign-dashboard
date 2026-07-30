@@ -8,12 +8,32 @@ Supports two matching modes:
 """
 
 import re
+import time
 from datetime import date, timedelta
 from dataclasses import dataclass, field
 
 from .auth import ShopifyAuth
 from .config import SHOPIFY_API_VERSION
 from ._http_retry import get_with_retry
+
+
+# Shopify REST admin API allows 2 requests/second (40-request burst bucket).
+# From datacenter hosts (Streamlit Cloud) our back-to-back fetches exceed
+# that and trigger sustained 429 storms; throttle every Shopify call to
+# stay safely under the limit.
+_MIN_REQUEST_INTERVAL = 0.55  # seconds
+_last_request_ts = 0.0
+
+
+def _throttled_get(url: str, **kwargs):
+    """get_with_retry, paced to respect Shopify's 2 req/s rate limit."""
+    global _last_request_ts
+    wait = _MIN_REQUEST_INTERVAL - (time.monotonic() - _last_request_ts)
+    if wait > 0:
+        time.sleep(wait)
+    resp = get_with_retry(url, **kwargs)
+    _last_request_ts = time.monotonic()
+    return resp
 
 
 def _normalize_code(code: str) -> str:
@@ -165,7 +185,7 @@ def _fetch_orders_in_window(
     }
 
     while True:
-        resp = get_with_retry(base_url, headers=auth.headers(), params=params)
+        resp = _throttled_get(base_url, headers=auth.headers(), params=params)
         resp.raise_for_status()
         data = resp.json()
         orders = data.get("orders", [])
