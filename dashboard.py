@@ -17,6 +17,11 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 
+# Pipeline code version — bump on every deploy-relevant change. Displayed in
+# the sidebar so a stale-module deploy (Streamlit Cloud soft-reload keeping
+# old src/ modules) is immediately visible instead of masquerading as bad data.
+PIPELINE_VERSION = "2026-08-04.1"
+
 # Ensure project root is on sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 PRODUCER_CODE_EXCEL = os.path.join(PROJECT_ROOT, "Producer - Discount Code Mapping - Copy.xlsx")
@@ -886,6 +891,18 @@ if _attr_failures:
         + ("\n- …" if len(_attr_failures) > 15 else "")
     )
 
+# Stale-module guard: if Streamlit Cloud soft-reloaded dashboard.py without
+# restarting the process, old src/ modules stay loaded and silently corrupt
+# the pipeline (rate-limit drops, missing kwargs). Make that state loud.
+from src import hubspot as _hubspot_mod
+_module_version = getattr(_hubspot_mod, "MODULE_VERSION", "pre-2026-08-04")
+if _module_version != PIPELINE_VERSION:
+    st.error(
+        f"🔴 **Stale deployment detected** — the app is running mixed code versions "
+        f"(dashboard {PIPELINE_VERSION}, modules {_module_version}). Data may be wrong. "
+        f"Reboot the app from the Streamlit Cloud console (Manage app → Reboot)."
+    )
+
 _stats_failures = data.get("hubspot_stats_failures") or []
 if _stats_failures:
     st.error(
@@ -928,7 +945,9 @@ with st.sidebar:
     st.markdown(f"""
     <div style="margin-top: 1.5rem; font-size: 0.8rem; color: {CLR_TEXT_MUTED};">
         Data from <strong style="color:{CLR_TEXT_SECONDARY};">{DATA_START_DATE}</strong><br>
-        <strong style="color:{CLR_TEXT_SECONDARY};">{data['main_count']}</strong> campaigns tracked
+        <strong style="color:{CLR_TEXT_SECONDARY};">{data['main_count']}</strong> campaigns tracked<br>
+        <span style="font-size:0.7rem;">Pipeline v{PIPELINE_VERSION}
+        ({'modules OK' if _module_version == PIPELINE_VERSION else 'STALE MODULES'})</span>
     </div>
     """, unsafe_allow_html=True)
 

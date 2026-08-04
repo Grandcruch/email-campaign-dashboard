@@ -17,6 +17,10 @@ from ._http_retry import get_with_retry
 V3_EMAILS_URL = "https://api.hubapi.com/marketing/v3/emails"
 V1_CAMPAIGN_URL = "https://api.hubapi.com/email/public/v1/campaigns"
 
+# Must match dashboard.PIPELINE_VERSION — the dashboard compares them at
+# startup to detect Streamlit Cloud soft-reloads that keep stale src modules.
+MODULE_VERSION = "2026-08-04.1"
+
 
 # HubSpot private apps allow 110 requests / 10s. Resolving v1 stats runs on a
 # thread pool, so pace the combined request rate well under that ceiling —
