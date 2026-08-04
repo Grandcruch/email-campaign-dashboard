@@ -1052,9 +1052,16 @@ def generate_unmatched_codes_report(
     Compare all Shopify discount codes against known campaign codes.
     Report unmatched codes with order counts and classification.
     """
+    # Shopify strips apostrophes from codes on orders (O'Shaughnessy ->
+    # OShaughnessy), so compare normalized forms on both sides — otherwise
+    # correctly-attributed campaigns show up as unmatched.
+    from .shopify_orders import _normalize_code
+
+    norm_campaign_codes = {_normalize_code(c) for c in campaign_codes}
+
     rows = []
     for code_lower, orders in shopify_code_map.items():
-        if code_lower in campaign_codes:
+        if _normalize_code(code_lower) in norm_campaign_codes:
             continue  # matched — not unmatched
 
         code_original = orders[0]["code_original"] if orders else code_lower

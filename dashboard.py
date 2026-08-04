@@ -599,6 +599,7 @@ def run_pipeline() -> dict:
         # Step 3: HubSpot campaigns
         status.update(label="Fetching HubSpot campaigns...")
         records = fetch_campaigns(hubspot_token)
+        hubspot_stats_failures = list(getattr(fetch_campaigns, "last_stats_failures", []))
         apply_overrides(records, overrides)
 
         # Tag family keys on parsed campaigns
@@ -780,6 +781,7 @@ def run_pipeline() -> dict:
         "producer_analytics": producer_analytics,
         "producer_map": producer_map,
         "attribution_failures": attribution_failures,
+        "hubspot_stats_failures": hubspot_stats_failures,
         "excluded_df": excluded_df,
         "unmatched_df": unmatched_df,
         "qa_summary": qa_summary,
@@ -882,6 +884,17 @@ if _attr_failures:
         f"orders may exist. Click **Refresh Data** in the sidebar to re-run.\n\n"
         + "\n".join(f"- {label}" for label, _msg in _attr_failures[:15])
         + ("\n- …" if len(_attr_failures) > 15 else "")
+    )
+
+_stats_failures = data.get("hubspot_stats_failures") or []
+if _stats_failures:
+    st.error(
+        f"⚠️ **HubSpot delivery stats were unreachable for {len(_stats_failures)} "
+        f"campaign(s)** during the last data load (rate limit or API error). They show "
+        f"0 delivered and their revenue may be understated. Click **Refresh Data** in "
+        f"the sidebar to re-run.\n\n"
+        + "\n".join(f"- {name}" for name in _stats_failures[:15])
+        + ("\n- …" if len(_stats_failures) > 15 else "")
     )
 
 

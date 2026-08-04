@@ -2,6 +2,9 @@
 hubspot.py — Fetch HubSpot email campaigns (v3) and delivery stats (v1).
 """
 
+import time
+import threading
+
 import requests
 from datetime import date, timedelta
 from dataclasses import dataclass
@@ -13,6 +16,26 @@ from ._http_retry import get_with_retry
 
 V3_EMAILS_URL = "https://api.hubapi.com/marketing/v3/emails"
 V1_CAMPAIGN_URL = "https://api.hubapi.com/email/public/v1/campaigns"
+
+
+# HubSpot private apps allow 110 requests / 10s. Resolving v1 stats runs on a
+# thread pool, so pace the combined request rate well under that ceiling —
+# from a datacenter host (Streamlit Cloud) unpaced parallel calls hit 429s,
+# which silently turned real campaigns into STATS_UNAVAILABLE.
+_MIN_V1_INTERVAL = 0.14  # seconds between v1 requests (~7/s)
+_v1_lock = threading.Lock()
+_v1_last_ts = 0.0
+
+
+def _throttled_v1_get(url: str, **kwargs) -> requests.Response:
+    """Rate-limited + retrying GET for the v1 campaign endpoint."""
+    global _v1_last_ts
+    with _v1_lock:
+        wait = _MIN_V1_INTERVAL - (time.monotonic() - _v1_last_ts)
+        if wait > 0:
+            time.sleep(wait)
+        _v1_last_ts = time.monotonic()
+    return get_with_retry(url, **kwargs)
 
 
 @dataclass
@@ -70,28 +93,37 @@ def _fetch_v3_emails(token: str) -> list[dict]:
     return all_emails
 
 
-def _resolve_v1_stats(token: str, campaign_ids: list[str]) -> dict | None:
+def _resolve_v1_stats(token: str, campaign_ids: list[str]) -> tuple[dict | None, bool]:
     """
     Try each ID from allEmailCampaignIds in the v1 endpoint.
-    Return the first one that resolves with delivered > 0, or None.
+
+    Returns (stats_or_None, request_failed). `request_failed` is True when a
+    lookup errored out (network/429/5xx after retries) rather than legitimately
+    returning no delivery data — callers must NOT mark those campaigns
+    STATS_UNAVAILABLE, since that silently drops real campaigns from the
+    dashboard and from the QA known-code set.
     """
     headers = hubspot_headers(token)
+    failed = False
     for cid in campaign_ids:
         try:
-            resp = requests.get(
+            resp = _throttled_v1_get(
                 f"{V1_CAMPAIGN_URL}/{cid}",
                 headers=headers,
-                timeout=15,
             )
+            if resp.status_code == 404:
+                continue  # genuinely no such campaign — not a failure
             if resp.status_code != 200:
+                failed = True
                 continue
             data = resp.json()
             counters = data.get("counters", {})
             if counters.get("delivered", 0) > 0:
-                return {"id": str(cid), "counters": counters, "name": data.get("name", "")}
+                return {"id": str(cid), "counters": counters, "name": data.get("name", "")}, False
         except requests.RequestException:
+            failed = True
             continue
-    return None
+    return None, failed
 
 
 def fetch_campaigns(token: str) -> list[CampaignRecord]:
@@ -138,18 +170,26 @@ def fetch_campaigns(token: str) -> list[CampaignRecord]:
 
         pending.append((record, all_ids))
 
-    # Resolve v1 stats in parallel. HubSpot private apps allow ~110 requests
-    # per 10s; 8 workers with ~1 request each per email stays well under.
+    # Resolve v1 stats in parallel. Requests are globally throttled (see
+    # _throttled_v1_get) so the pool cannot exceed HubSpot's rate limit.
     from concurrent.futures import ThreadPoolExecutor
 
     def _resolve_one(item):
         record, all_ids = item
-        return record, _resolve_v1_stats(token, all_ids)
+        stats, failed = _resolve_v1_stats(token, all_ids)
+        return record, stats, failed
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        for record, v1 in pool.map(_resolve_one, pending):
+    stats_failures: list[str] = []
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for record, v1, failed in pool.map(_resolve_one, pending):
             if v1 is None:
-                record.parsed.qa_bucket = "STATS_UNAVAILABLE"
+                if failed:
+                    # HubSpot was unreachable/rate-limited — do NOT silently
+                    # drop the campaign. Keep its bucket so it stays in the
+                    # main table and in the QA known-code set.
+                    stats_failures.append(record.parsed.raw_name)
+                else:
+                    record.parsed.qa_bucket = "STATS_UNAVAILABLE"
                 continue
             counters = v1["counters"]
             record.hubspot_v1_campaign_id = v1["id"]
@@ -164,4 +204,13 @@ def fetch_campaigns(token: str) -> list[CampaignRecord]:
                 record.parsed.qa_bucket = "STATS_UNAVAILABLE"
 
     print(f"  [hubspot] {len(records)} campaigns in scope (>= {DATA_START_DATE})")
+    if stats_failures:
+        print(f"  [hubspot] WARNING: delivery stats unreachable for "
+              f"{len(stats_failures)} campaign(s) — retained with 0 delivered:")
+        for name in stats_failures[:10]:
+            print(f"    - {name}")
+    fetch_campaigns.last_stats_failures = stats_failures
     return records
+
+
+fetch_campaigns.last_stats_failures = []
