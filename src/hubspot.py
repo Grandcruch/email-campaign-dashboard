@@ -19,7 +19,7 @@ V1_CAMPAIGN_URL = "https://api.hubapi.com/email/public/v1/campaigns"
 
 # Must match dashboard.PIPELINE_VERSION — the dashboard compares them at
 # startup to detect Streamlit Cloud soft-reloads that keep stale src modules.
-MODULE_VERSION = "2026-08-04.1"
+MODULE_VERSION = "2026-08-06.1"
 
 
 # HubSpot private apps allow 110 requests / 10s. Resolving v1 stats runs on a

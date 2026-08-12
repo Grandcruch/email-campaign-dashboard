@@ -20,7 +20,7 @@ import altair as alt
 # Pipeline code version — bump on every deploy-relevant change. Displayed in
 # the sidebar so a stale-module deploy (Streamlit Cloud soft-reload keeping
 # old src/ modules) is immediately visible instead of masquerading as bad data.
-PIPELINE_VERSION = "2026-08-04.1"
+PIPELINE_VERSION = "2026-08-06.1"
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -1794,9 +1794,9 @@ with tab_method:
 
 Every campaign name follows: `YYYY-MM-DD - Producer/Topic - Type - OfferValue - Code`
 
-- **Type** is one of `PROD` (sellable offer), `EDU` (educational), or `CONTENT`.
-- Only **PROD campaigns with a real discount code** are matched to Shopify orders. EDU/CONTENT campaigns show delivery stats only.
-- A/B test versions of the same campaign (same code, same send date) are automatically **merged into one row** — delivery stats are summed, and the shared Shopify attribution is counted once.
+- **Type** is one of `PROD` (sellable offer), `EDU` (educational), `CONTENT`, or `HYBR` (hybrid — EDU-style content to part of the audience, offer framing to the rest).
+- Campaigns **with a real discount code** are matched to Shopify orders; campaigns without one show delivery stats only.
+- A/B test versions and EDU/HYBR sibling sends of the same campaign (same code, same send date) are automatically **merged into one row** — delivery stats are summed, and the shared Shopify attribution is counted once.
 
 #### Attribution window
 

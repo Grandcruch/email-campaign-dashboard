@@ -52,7 +52,10 @@ def is_bin_or_holiday(campaign_name: str, producer_topic: str) -> bool:
     return any(kw in combined for kw in BIN_HOLIDAY_KEYWORDS)
 
 
-VALID_TYPES = {"PROD", "EDU", "CONTENT"}
+# HYBR (added 2026-08-06): hybrid send — EDU-style content to part of the
+# audience, offer framing to the rest, same code + send date. Merges with its
+# sibling via A/B grouping; attribution-eligible like PROD when it has a code.
+VALID_TYPES = {"PROD", "EDU", "CONTENT", "HYBR"}
 
 
 def parse_campaign_name(raw_name: str) -> ParsedCampaign:

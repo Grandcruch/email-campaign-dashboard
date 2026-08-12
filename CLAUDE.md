@@ -46,7 +46,7 @@ Deployment: Streamlit Cloud (password-gated).
 Campaigns must follow: `YYYY-MM-DD - Producer/Topic - Type - OfferValue - Code`
 
 - **Date formats accepted:** `2026-03-20`, `2026-0323`, `2026_0317`. Parser normalises all three via `^(\d{4})[-_]?(\d{2})-?(\d{2})`.
-- **Type** ∈ {`PROD`, `EDU`, `CONTENT`}. Only PROD campaigns with a non-None code are eligible for Shopify attribution. EDU/CONTENT show delivery metrics only; Shopify columns are `null`.
+- **Type** ∈ {`PROD`, `EDU`, `CONTENT`, `HYBR`}. Campaigns with a non-None code are attribution-eligible regardless of type; codeless campaigns show delivery metrics only (Shopify columns `null`). `HYBR` (added 2026-08-06) marks a hybrid send paired with an EDU sibling (same code + send date); A/B grouping merges the pair into one reporting row.
 - **Split delimiter:** ` - ` (space-dash-space), exactly 5 segments. The parser auto-repairs minor whitespace-around-dash typos (e.g. `Palmer- PROD`); anything not auto-repairable goes to `PARSE_ERROR` / `LEGACY_FORMAT` in the QA excluded output and can be rescued via `campaign_overrides.csv`.
 - **Code = "None"** → `discount_code = null`, no attribution attempted.
 

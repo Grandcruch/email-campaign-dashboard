@@ -119,7 +119,7 @@ Split by ` - ` (space-dash-space). Must produce exactly 5 segments.
 |---|---|---|---|
 | Date | 0 | `2026-03-19`, `2026-0323`, `2026_0317` | Must match date regex; normalized to `YYYY-MM-DD` |
 | Producer/Topic | 1 | `Bryant Family`, `2010 Cos d'Estournel`, `BIN Sale` | Free text; used as grouping key for producer reports |
-| Campaign Type | 2 | `PROD`, `EDU`, `CONTENT` | Must be one of the three; otherwise `PARSE_ERROR` |
+| Campaign Type | 2 | `PROD`, `EDU`, `CONTENT`, `HYBR` | Must be one of the four; otherwise `PARSE_ERROR`. `HYBR` (added 2026-08-06) = hybrid send: EDU-style content to part of the audience, offer framing to the rest, sharing one code + send date with its sibling email — the A/B grouping step merges the pair into a single reporting row (delivery summed, shared attribution counted once, type shown as e.g. `EDU/HYBR`). |
 | Offer Value | 3 | `7%`, `10%`, `5%`, `None` | Informational; not used in attribution logic |
 | Discount Code | 4 | `BryantFam`, `SQN`, `None` | `"None"` → set to `null`; otherwise used as Shopify matching key |
 
