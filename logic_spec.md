@@ -201,6 +201,26 @@ If the same code appears in multiple campaigns with overlapping windows:
 2. Log `DUPLICATE_CODE_WARNING` for all affected campaigns
 3. Flag for manual review
 
+**Implementation (added 2026-08-24).** Rule 1 is enforced by
+`shopify_orders._owns_order(order, send_date, sibling_send_dates)`, called at
+the top of the order loop in both `compute_attribution` and
+`compute_family_attribution`. Callers build a `{code -> sorted send_dates}` map
+across all main-table campaigns and pass the matching list as
+`sibling_send_dates`; a list of fewer than two entries is a no-op, so
+single-send codes are unaffected.
+
+Edge case: an order predating every send of its code (possible when a code
+leaks early) is claimed by the **earliest** send rather than dropped, so order
+counts still reconcile.
+
+> **This was previously unenforced.** Until 2026-08-24 each send attributed
+> independently over its own window, so every send whose window contained an
+> order counted that order again. Multi-send events were inflated roughly in
+> proportion to their send count — the June 2026 Father's Day large-format
+> event reported $90,454 + $69,021 against a true event total of $90,454.
+> Per-send figures published before this date are **not** additive; event
+> totals from that period should be treated as overstated.
+
 ### 5.4 Single Attribution Only
 
 Each order is attributed to exactly one campaign (the one whose code matches). No multi-campaign attribution. No splitting.

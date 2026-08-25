@@ -65,7 +65,7 @@ def main():
 
     # ── Step 3: Fetch HubSpot campaigns ──────────────────────────────────
     print("\n[3/8] Fetching HubSpot campaigns...")
-    records = fetch_campaigns(hubspot_token)
+    records = fetch_campaigns(hubspot_token, always_resolve_names=set(overrides))
 
     # Apply overrides
     apply_overrides(records, overrides)
@@ -132,6 +132,21 @@ def main():
     all_orders = _fetch_orders_in_window(shopify_auth, DATA_START_DATE, run_date)
     print(f"  {len(all_orders)} orders fetched")
 
+    # logic_spec 5.3 — map each code/family key to every send_date that uses
+    # it, so overlapping windows can resolve a single owner per order instead
+    # of each send counting the same order again.
+    sibling_dates: dict[str, list] = {}
+    for code, send_date, _w, _p in attribution_tasks:
+        sibling_dates.setdefault(code.lower(), []).append(send_date)
+    for family_key, send_date, _w in family_tasks:
+        sibling_dates.setdefault(family_key.lower(), []).append(send_date)
+    for k in sibling_dates:
+        sibling_dates[k] = sorted(set(sibling_dates[k]))
+    dupes = {k: v for k, v in sibling_dates.items() if len(v) > 1}
+    if dupes:
+        print(f"  [dedup] {len(dupes)} code(s) reused across sends — "
+              f"resolving to most recent preceding send (logic_spec 5.3)")
+
     seen = set()
 
     # Standard code attribution
@@ -148,6 +163,7 @@ def main():
                 producer_topic=producer_topic,
                 all_campaign_identifiers=all_campaign_identifiers,
                 orders=all_orders,
+                sibling_send_dates=sibling_dates.get(code.lower()),
             )
         except Exception as exc:
             print(f"    SKIPPED ({type(exc).__name__}): {exc}")
@@ -169,6 +185,7 @@ def main():
             attr = compute_family_attribution(
                 shopify_auth, family_key, title_ids, send_date, window,
                 orders=all_orders,
+                sibling_send_dates=sibling_dates.get(family_key.lower()),
             )
         except Exception as exc:
             print(f"    SKIPPED ({type(exc).__name__}): {exc}")

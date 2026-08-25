@@ -29,3 +29,7 @@ Thumbs.db
 
 # Overrides file (may contain business-sensitive data)
 campaign_overrides.csv
+
+# Local backups created during edits
+*.bak
+*.backup-*.csv

@@ -61,7 +61,7 @@ def run_export():
 
     # ── Step 3: Fetch HubSpot campaigns ──────────────────────────────────
     print("\n[3/6] Fetching HubSpot campaigns...")
-    records = fetch_campaigns(hubspot_token)
+    records = fetch_campaigns(hubspot_token, always_resolve_names=set(overrides))
     apply_overrides(records, overrides)
 
     # Tag family keys
@@ -118,6 +118,16 @@ def run_export():
     all_orders = _fetch_orders_in_window(shopify_auth, DATA_START_DATE, run_date)
     print(f"  {len(all_orders)} orders fetched")
 
+    # logic_spec 5.3 — map each code/family key to every send_date that
+    # uses it, so overlapping windows resolve one owner per order.
+    sibling_dates: dict[str, list] = {}
+    for _c, _sd, _w, _p in attribution_tasks:
+        sibling_dates.setdefault(_c.lower(), []).append(_sd)
+    for _fk, _sd, _w in family_tasks:
+        sibling_dates.setdefault(_fk.lower(), []).append(_sd)
+    for _k in sibling_dates:
+        sibling_dates[_k] = sorted(set(sibling_dates[_k]))
+
     seen = set()
 
     # Standard code attribution
@@ -134,6 +144,7 @@ def run_export():
                 producer_topic=producer_topic,
                 all_campaign_identifiers=all_campaign_identifiers,
                 orders=all_orders,
+                sibling_send_dates=sibling_dates.get(code.lower()),
             )
         except Exception as exc:
             print(f"    SKIPPED ({type(exc).__name__}): {exc}")
@@ -155,6 +166,7 @@ def run_export():
             attr = compute_family_attribution(
                 shopify_auth, family_key, title_ids, send_date, window,
                 orders=all_orders,
+                sibling_send_dates=sibling_dates.get(family_key.lower()),
             )
         except Exception as exc:
             print(f"    SKIPPED ({type(exc).__name__}): {exc}")

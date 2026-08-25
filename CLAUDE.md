@@ -39,7 +39,7 @@ Deployment: Streamlit Cloud (password-gated).
 
 **Duplicate codes:** attribute to the most recent `send_date` preceding the order; flag `DUPLICATE_CODE_WARNING`.
 
-**Single attribution only** — each order is attributed to exactly one campaign.
+**Single attribution only** — each order is attributed to exactly one campaign. When one code is used by several sends with overlapping windows, the order goes to the **most recent send preceding it** (`logic_spec` 5.3/5.4), enforced by `shopify_orders._owns_order` via the `sibling_send_dates` argument. Callers must build a `{code -> sorted send_dates}` map and pass it — omitting it silently restores the old double-counting.
 
 ## Naming convention
 
@@ -52,7 +52,7 @@ Campaigns must follow: `YYYY-MM-DD - Producer/Topic - Type - OfferValue - Code`
 
 ## Business rules (authoritative)
 
-- `src/config.py:DATA_START_DATE` is the data floor. Currently **2026-03-01**. Do not change without explicit approval — history rows are keyed on this.
+- `src/config.py:DATA_START_DATE` is the data floor. Currently **2025-05-01**. Do not change without explicit approval — history rows are keyed on this.
 - Minimum delivered for efficiency rankings: **50** (`reports.MIN_DELIVERED_THRESHOLD`).
 - BIN / holiday keyword list lives in `src/config.py:BIN_HOLIDAY_KEYWORDS`.
 - Known non-campaign discount codes (excluded from unmatched-code review): `GrandCru`, `GCLA-*`, `THANKYOU*`.
@@ -110,10 +110,21 @@ output/                     # Regenerated each run (gitignored)
 8. **Parser changes** are especially risky — they cascade into the history table. Prefer additive changes (e.g. new QA bucket) over modifying existing parse logic.
 9. **Before any refactor of `dashboard.py` or `reports.py`**, confirm with the user — the project is actively used in production.
 
+## Recent changes (2026-08-24)
+
+- **Duplicate-code attribution fixed.** `logic_spec` 5.3 was specified but never implemented: every send whose window contained an order counted that order, so multi-send events were inflated roughly in proportion to send count (Father's Day '26 reported $90,454 + $69,021 for a $90,454 event). Now resolved to the most recent preceding send. **Per-send figures published before this date are not additive.**
+- **`campaign_overrides.csv` grew from 3 to 13 rows**, rescuing campaigns the parser was silently dropping:
+  - Labor Day 2025 BIN Sale ×3 (`LaborDay25`, $54,027) — 4-segment name, no OfferValue.
+  - Father's Day 2025 sale ×4 (`FathersDay25`, $35,442) — legacy 1-segment names.
+  - Cyber Monday 2025 BIN reminder — name ends at OfferValue, code segment missing.
+  - Two **year typos** where the name says 2026 but HubSpot `publishDate` says 2025: `4th of July Large Formats NEW` (2025-06-28) and `Summer Kickoff California Whites` (2025-06-20). The July one was surfacing as a false `$0` **and** a phantom 2026 event.
+- **Audit the QA excluded list periodically.** 51 campaigns still fail to parse; most are legitimately transactional (Shipping Confirmation, Ticket, Loyalty, Welcome), but revenue-bearing sends do end up there when names drift from the convention.
+- **`KNOWN_NON_CAMPAIGN_CODE_*` only affects the unmatched-code QA report's wording** (`reports._classify_unmatched_code`). It does **not** suppress attribution — a campaign using the `ThankYou` code still attributes normally.
+
 ## Recent decisions (2026-04-07 handoff session)
 
 - **Attributed Revenue = net line-item:** `line_item.price * quantity - discount_allocations[i].amount`. This is the locked definition. `logic_spec.md` must be updated to match.
-- **Data floor = 2026-03-01** (matches current `config.DATA_START_DATE`). May expand to earlier months later, but existing floor is frozen for now; don't touch history rows before 2026-03-01.
+- **Data floor = 2025-05-01** (matches current `config.DATA_START_DATE`).
 - **Design docs (`plan.md`, `logic_spec.md`, `prompts/`, `HANDOFF.md`, `CLAUDE.md`) will be committed to git.**
 - **STATS_UNAVAILABLE campaigns are simply unsent** — no investigation needed; can be suppressed or left as-is.
 - **Parser auto-repair** for trivial whitespace-around-dash typos (e.g. `Palmer- PROD` → `Palmer - PROD`). Anything not auto-repairable still goes to QA excluded.

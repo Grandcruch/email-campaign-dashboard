@@ -603,7 +603,7 @@ def run_pipeline() -> dict:
 
         # Step 3: HubSpot campaigns
         status.update(label="Fetching HubSpot campaigns...")
-        records = fetch_campaigns(hubspot_token)
+        records = fetch_campaigns(hubspot_token, always_resolve_names=set(overrides))
         hubspot_stats_failures = list(getattr(fetch_campaigns, "last_stats_failures", []))
         apply_overrides(records, overrides)
 
@@ -662,6 +662,16 @@ def run_pipeline() -> dict:
         # Attribution dict is keyed by "code|send_date" so each campaign
         # gets its own attribution result for its own window, even if
         # multiple campaigns share the same discount code / family key.
+        # logic_spec 5.3 — map each code/family key to every send_date that
+        # uses it, so overlapping windows resolve one owner per order.
+        sibling_dates: dict[str, list] = {}
+        for _c, _sd, _w, _p in attribution_tasks:
+            sibling_dates.setdefault(_c.lower(), []).append(_sd)
+        for _fk, _sd, _w in family_tasks:
+            sibling_dates.setdefault(_fk.lower(), []).append(_sd)
+        for _k in sibling_dates:
+            sibling_dates[_k] = sorted(set(sibling_dates[_k]))
+
         seen = set()
 
         # Standard code attribution
@@ -678,6 +688,7 @@ def run_pipeline() -> dict:
                     producer_topic=producer_topic,
                     all_campaign_identifiers=all_campaign_identifiers,
                     orders=all_orders,
+                    sibling_send_dates=sibling_dates.get(code.lower()),
                 )
             except Exception as exc:
                 attribution_failures.append((f"{code} @ {send_date}", str(exc)))
@@ -698,6 +709,7 @@ def run_pipeline() -> dict:
                 attr = compute_family_attribution(
                     shopify_auth, family_key, title_ids, send_date, window,
                     orders=all_orders,
+                    sibling_send_dates=sibling_dates.get(family_key.lower()),
                 )
             except Exception as exc:
                 attribution_failures.append((f"{family_key} @ {send_date}", str(exc)))

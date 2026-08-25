@@ -130,11 +130,22 @@ def _resolve_v1_stats(token: str, campaign_ids: list[str]) -> tuple[dict | None,
     return None, failed
 
 
-def fetch_campaigns(token: str) -> list[CampaignRecord]:
+def fetch_campaigns(
+    token: str,
+    always_resolve_names: set[str] | None = None,
+) -> list[CampaignRecord]:
     """
     Main entry point: fetch v3 emails, parse names, resolve v1 stats.
     Returns list of CampaignRecord for all campaigns >= DATA_START_DATE.
+
+    Parameters:
+        always_resolve_names: raw campaign names that must have their v1 stats
+            resolved even when the name fails to parse. Overrides are applied
+            *after* this function runs, so a campaign rescued by
+            campaign_overrides.csv would otherwise be promoted into the main
+            table carrying delivered = 0. Callers pass the override keys.
     """
+    always_resolve_names = always_resolve_names or set()
     raw_emails = _fetch_v3_emails(token)
     records: list[CampaignRecord] = []
     # Records whose v1 stats still need resolving: (record, allEmailCampaignIds)
@@ -163,8 +174,11 @@ def fetch_campaigns(token: str) -> list[CampaignRecord]:
         )
         records.append(record)
 
-        # If parse failed (LEGACY_FORMAT, PARSE_ERROR), no stats needed (QA only)
-        if parsed.qa_bucket in ("PARSE_ERROR", "LEGACY_FORMAT"):
+        # If parse failed (LEGACY_FORMAT, PARSE_ERROR), no stats needed (QA
+        # only) — unless an override will rescue this campaign, in which case
+        # it lands in the main table and needs real delivery numbers.
+        if (parsed.qa_bucket in ("PARSE_ERROR", "LEGACY_FORMAT")
+                and name not in always_resolve_names):
             continue
 
         all_ids = email.get("allEmailCampaignIds", [])
