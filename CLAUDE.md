@@ -76,6 +76,7 @@ src/
   overrides.py              # load_overrides, apply_overrides
   families.py               # discount family mapping loader
   shopify_orders.py         # compute_attribution, compute_family_attribution
+  journey_attribution.py    # Offer Section evidence buckets (logic_spec.md §13)
   reports.py                # DashboardRow, assemble, weekly/monthly/producer, history upsert
 
 plan.md                     # Phase-2 implementation blueprint

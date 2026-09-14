@@ -11,7 +11,8 @@ Usage:
 
 import sys
 import os
-from datetime import date, timedelta
+import json
+from datetime import date, datetime, timedelta
 
 import streamlit as st
 import pandas as pd
@@ -20,7 +21,7 @@ import altair as alt
 # Pipeline code version — bump on every deploy-relevant change. Displayed in
 # the sidebar so a stale-module deploy (Streamlit Cloud soft-reload keeping
 # old src/ modules) is immediately visible instead of masquerading as bad data.
-PIPELINE_VERSION = "2026-08-06.1"
+PIPELINE_VERSION = "2026-09-14.1"
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -30,7 +31,15 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from src.config import load_env, DATA_START_DATE, OUTPUT_DIR
 from src.auth import ShopifyAuth, hubspot_headers
-from src.hubspot import fetch_campaigns
+from src.hubspot import fetch_campaigns, _fetch_v3_emails
+from src.journey_attribution import (
+    classify_section_orders,
+    bucket_summary,
+    fetch_section_clicks,
+    SECTION_LAUNCH_DATE,
+    JOURNEY_LOOKBACK_DAYS,
+    BUCKET_LABELS,
+)
 from src.overrides import load_overrides, apply_overrides
 from src.shopify_orders import (
     compute_attribution,
@@ -1015,13 +1024,40 @@ _producer_current_df, _producer_final_df = generate_producer_report(display_df)
 
 # ─── Tabs ────────────────────────────────────────────────────────────────────
 
-tab_weekly, tab_monthly, tab_producer, tab_qa, tab_method = st.tabs([
+tab_weekly, tab_monthly, tab_producer, tab_section, tab_qa, tab_method = st.tabs([
     "Weekly",
     "Monthly",
     "Producers",
+    "Offer Section",
     "QA",
     "Methodology",
 ])
+
+
+@st.cache_resource(ttl=6 * 3600, show_spinner=False)
+def load_section_impact() -> dict:
+    """Journey-classify post-launch orders + fetch section clicks.
+
+    Separate from run_pipeline so the main dashboard load is unaffected;
+    computed on demand from the Offer Section tab, then shared across all
+    sessions for 6 hours. Per-order classifications are additionally cached
+    on disk (journey_cache.csv) so only new orders ever cost API calls.
+    """
+    env = load_env()
+    token = env["HUBSPOT_PRIVATE_APP_TOKEN"]
+    auth = ShopifyAuth(
+        store_domain=env["SHOPIFY_STORE_DOMAIN"],
+        client_id=env["SHOPIFY_CLIENT_ID"],
+        client_secret=env["SHOPIFY_CLIENT_SECRET"],
+    )
+    raw_v3 = _fetch_v3_emails(token)
+    orders_df = classify_section_orders(token, auth, raw_v3)
+    clicks_df = fetch_section_clicks(token, SECTION_LAUNCH_DATE)
+    return {
+        "orders": orders_df,
+        "clicks": clicks_df,
+        "loaded_at": datetime.now(),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1703,7 +1739,150 @@ with tab_producer:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Tab 4: QA — Data Quality & Diagnostics
+# Tab 4: Offer Section — "Current Offers" email section impact
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with tab_section:
+    section_title(
+        "Current Offers Section — Impact",
+        f"Evidence-based journey attribution · live since {SECTION_LAUNCH_DATE} · "
+        "separate from Attributed Revenue, never blended",
+    )
+
+    st.warning(
+        "**Read this before the numbers — what this CAN and CANNOT tell you**\n\n"
+        "- **Evidence, not proof.** Each order is classified by the buyer's observable "
+        "HubSpot click/delivery trail. Bucket A (section click, never received the "
+        "original offer email) is very strong evidence; Bucket B (clicked section but "
+        "also received the original email) is directional only — we cannot know which "
+        "touch caused the purchase.\n"
+        "- **Bucket D is permanently unattributable.** Buyers who only opened emails, "
+        "typed a code by hand, checked out under a different email address, or switched "
+        "devices leave no click trail. No method except separate section-only discount "
+        "codes could ever claim these.\n"
+        "- **Same-session tracking chronically understates** — ~40% of redemptions land "
+        "1–8 days after a send — which is why this report joins clicks to later orders "
+        "per person instead of relying on session UTMs.\n"
+        f"- **Lookback is {JOURNEY_LOOKBACK_DAYS} days** before each order; clicks are "
+        "matched per code with a last-click rule.\n"
+        "- **Gmail clipping dilutes exposure**: emails over ~102KB hide the section (it "
+        "sits at the bottom) for some recipients until the template slim-down ships.\n"
+        f"- **Clean data starts {SECTION_LAUNCH_DATE}** (first send carrying the "
+        "section). Pre-launch orders cannot be classified.\n"
+        "- **Incrementality is out of scope**: whether these buyers would have purchased "
+        "anyway can only be answered with a holdout test (randomly omitting the section "
+        "from some sends)."
+    )
+
+    if not st.session_state.get("section_impact_requested"):
+        st.info(
+            "Journey data is loaded on demand so the main dashboard stays fast. "
+            "First load fetches each buyer's HubSpot activity (~1–3 min); results "
+            "are then cached for 6 hours for all viewers, and each order is only "
+            "ever classified once."
+        )
+        if st.button("Load section impact data", type="primary", key="load_section_impact_btn"):
+            st.session_state["section_impact_requested"] = True
+            st.rerun()
+    else:
+        with st.spinner("Reconstructing buyer journeys from HubSpot + Shopify..."):
+            _si = load_section_impact()
+        _orders = _si["orders"]
+        _clicks = _si["clicks"]
+
+        _sec_touched = _orders[_orders["bucket"].isin(["A", "B"])] if not _orders.empty else pd.DataFrame()
+        _d_rev = _orders[_orders["bucket"] == "D"]["total_price"].sum() if not _orders.empty else 0
+        _tot_rev = _orders["total_price"].sum() if not _orders.empty else 0
+        render_kpi_row([
+            {"label": "Section Clicks", "value": f"{len(_clicks):,}",
+             "sub": f"{_clicks['recipient'].nunique() if not _clicks.empty else 0} unique clickers"},
+            {"label": "Section-Touched Orders", "value": str(len(_sec_touched)),
+             "sub": "Buckets A + B"},
+            {"label": "Section-Touched Revenue", "value": f"${_sec_touched['total_price'].sum() if not _sec_touched.empty else 0:,.2f}",
+             "sub": "Evidence-based, not causal"},
+            {"label": "Unattributable Share", "value": f"{(100 * _d_rev / _tot_rev) if _tot_rev else 0:.0f}%",
+             "sub": "Bucket D revenue share"},
+        ])
+        st.caption(
+            f"Data loaded {_si['loaded_at'].strftime('%Y-%m-%d %H:%M')} · "
+            f"{len(_orders)} code-redeeming orders classified since {SECTION_LAUNCH_DATE}."
+        )
+
+        spacer("md")
+        section_title("Evidence buckets", "Every code-redeeming order since launch, classified once")
+        st.dataframe(
+            bucket_summary(_orders),
+            column_config={
+                "Revenue": st.column_config.NumberColumn(format="$%.2f"),
+            },
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        spacer("md")
+        section_title("Section clicks by offer code", "Which offers the section is driving interest toward")
+        if not _clicks.empty:
+            _by_code = _clicks.groupby("code").size().reset_index(name="Clicks") \
+                .sort_values("Clicks", ascending=True)
+            _chart = alt.Chart(_by_code).mark_bar(color=CLR_PRODUCER).encode(
+                y=alt.Y("code:N", sort="-x", title=None),
+                x=alt.X("Clicks:Q"),
+                tooltip=["code:N", "Clicks:Q"],
+            ).properties(height=max(len(_by_code) * 34, 160))
+            st.altair_chart(styled_chart(_chart), use_container_width=True)
+        else:
+            st.info("No section clicks recorded yet.")
+
+        spacer("md")
+        section_title("Order drill-down", "Per-order journey evidence")
+        if not _orders.empty:
+            _disp = _orders.copy()
+            _disp["Bucket"] = _disp["bucket"].map(BUCKET_LABELS)
+            _disp["Order Date"] = pd.to_datetime(
+                _disp["order_created_at"], utc=True, format="ISO8601"
+            ).dt.strftime("%Y-%m-%d")
+
+            def _fmt_evidence(js):
+                try:
+                    parts = []
+                    for pc in json.loads(js):
+                        bits = []
+                        if pc.get("section_click"):
+                            lag = pc.get("section_click_lag_hours")
+                            bits.append(f"section click{f' ({lag:.0f}h before order)' if lag is not None else ''}")
+                        if pc.get("original_click"):
+                            bits.append("original-email click")
+                        if pc.get("received_original"):
+                            bits.append("received original email")
+                        parts.append(f"{pc['code']}: " + (", ".join(bits) or "no trail"))
+                    return " | ".join(parts)
+                except Exception:
+                    return ""
+
+            _disp["Evidence"] = _disp["evidence_json"].apply(_fmt_evidence)
+            st.dataframe(
+                _disp[["Order Date", "order_name", "customer_masked", "codes",
+                       "Bucket", "total_price", "Evidence"]],
+                column_config={
+                    "order_name": st.column_config.TextColumn("Order", width="small"),
+                    "customer_masked": st.column_config.TextColumn("Customer", width="small"),
+                    "codes": st.column_config.TextColumn("Code(s)", width="small"),
+                    "total_price": st.column_config.NumberColumn("Order Total", format="$%.2f"),
+                    "Evidence": st.column_config.TextColumn("Journey evidence", width="large"),
+                },
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("No code-redeeming orders since launch yet.")
+
+        if st.button("Refresh journey data", key="refresh_section_impact"):
+            load_section_impact.clear()
+            st.rerun()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tab 5: QA — Data Quality & Diagnostics
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab_qa:
@@ -1850,6 +2029,31 @@ An order counts as **Influenced** when, inside the campaign's attribution window
 **Known limitations:**
 - `landing_site` only captures the **first session**. A buyer who clicks the email on their phone but orders later from a laptop won't be captured — Influenced numbers are a *floor*, not a ceiling.
 - Offer-wine line matching compares the campaign's Producer/Topic text against Shopify product titles; unusual naming mismatches can miss a line (the order still counts in Influenced Total Sales).
+""")
+
+    spacer("md")
+    section_title("Offer Section impact — journey attribution", "The Current Offers email section (live since 2026-09-11)")
+
+    st.markdown("""
+Every daily offer email carries a **Current Offers** section listing all open offers. Its links
+are the only ones tagged `utm_term=offer_recs`, and each offer's featured email is excluded from
+its own section — so a section click is by definition a cross-offer click.
+
+Because the same discount code works from both the original email and the section, a redemption
+alone cannot reveal its source. Instead, each code-redeeming order since launch is classified by
+the buyer's **HubSpot click and delivery trail** (30-day lookback):
+
+| Bucket | Evidence | Strength |
+|---|---|---|
+| **A — Section only** | Clicked the section's link for that code; never *received* the code's original email | Very strong section attribution |
+| **B — Section + original** | Clicked the section's link but also received the original email | Directional — either touch could have converted |
+| **C — Original only** | Clicked or received the original email; no section click | Normal path |
+| **D — No evidence** | No click trail (open-only, typed code, different device/email) | Unattributable — reported honestly, credited to neither side |
+
+**These figures are evidence, not causal proof, and are never blended into Attributed Revenue.**
+Known limitations: Bucket D is permanently blind to any click-based method; Gmail clipping hides
+the section for some recipients (emails ~113–117KB vs the ~102KB clip limit) until the template
+slim-down; and incrementality would require a holdout test.
 """)
 
     spacer("md")

@@ -420,3 +420,58 @@ These are reported in the unmatched discount codes QA output with `possible_reas
     ├─ Excluded Campaigns
     ├─ Matched Orders Audit
 ```
+
+---
+
+## 13. Offer Section Journey Attribution (added 2026-09-14)
+
+Evaluates the "Current Offers" email section (live since **2026-09-11**, first
+carried by the `2026-09-11 - 2000 Lafite` send — verified against stored email
+content). Implemented in `src/journey_attribution.py`; surfaced on the
+dashboard's **Offer Section** tab. **Never blended into the locked primary
+metrics.**
+
+### 13.1 Why redemptions alone cannot attribute the section
+
+Section links apply the SAME discount code as the offer's original email
+(`/discount/<CODE>?...utm_term=offer_recs`). `utm_term=offer_recs` is the only
+distinguishing marker (HubSpot appends its own utm_source/medium/campaign to
+every link). The featured offer is excluded from its own email's section, so a
+section click is by definition cross-offer.
+
+### 13.2 Evidence buckets
+
+For every order redeeming a campaign code since launch, fetch the buyer's
+HubSpot events (recipient-level CLICK + DELIVERED, 30-day lookback, throttled),
+and per redeemed code classify:
+
+```
+section_click  = CLICK on /discount/<code> URL containing offer_recs, before order
+original_click = CLICK on /discount/<code> URL without offer_recs, before order
+received       = DELIVERED event matching any campaign that features <code>
+                 (via allEmailCampaignIds) sent within the lookback window
+
+Bucket A (section_only):          section_click AND NOT received   — strongest
+Bucket B (section_and_original):  section_click AND received       — directional
+Bucket C (original_only):         original_click OR received       — normal path
+Bucket D (no_evidence):           none of the above                — unattributable
+```
+
+- Order revenue is counted ONCE per order; a multi-code order takes the
+  strongest bucket across its codes (A > B > C > D). Per-code evidence is
+  retained for the drill-down.
+- Classification is final once computed (clicks cannot appear retroactively
+  before an existing order); cached by order id in `output/journey_cache.csv`.
+- Non-campaign codes (GrandCru, GCLA-*, THANKYOU*, lastchance) are ignored.
+
+### 13.3 Declared limitations (shown on the dashboard tab)
+
+1. Evidence-based, not causal. Bucket B cannot separate which touch converted.
+2. Bucket D (open-only readers, hand-typed codes, cross-device/different
+   checkout email) is unattributable by ANY click-based method.
+3. Same-session UTM capture chronically understates (~40% of redemptions land
+   1–8 days post-send) — hence click-to-order joins instead of session UTMs.
+4. Gmail clips emails over ~102KB; the section sits at the bottom of ~113–117KB
+   emails, so part of the audience cannot see it until the template slim-down.
+5. Incrementality requires a holdout test (randomly omitting the section);
+   out of scope for observational reporting.
