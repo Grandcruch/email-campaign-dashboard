@@ -21,7 +21,7 @@ import altair as alt
 # Pipeline code version — bump on every deploy-relevant change. Displayed in
 # the sidebar so a stale-module deploy (Streamlit Cloud soft-reload keeping
 # old src/ modules) is immediately visible instead of masquerading as bad data.
-PIPELINE_VERSION = "2026-09-14.1"
+PIPELINE_VERSION = "2026-10-23.1"
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -794,6 +794,7 @@ def run_pipeline() -> dict:
         "producer_final_df": producer_final_df,
         "producer_analytics": producer_analytics,
         "producer_map": producer_map,
+        "offer_type_map": offer_type_map,
         "attribution_failures": attribution_failures,
         "hubspot_stats_failures": hubspot_stats_failures,
         "excluded_df": excluded_df,
@@ -983,9 +984,19 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
     exclude_bin_holiday = st.toggle(
-        "Exclude BIN Sale & Holiday campaigns",
+        "Exclude BIN Sale, Large Format & Holiday campaigns",
         value=False,
         key="exclude_bin_holiday",
+        help=(
+            "Hides event campaigns so standalone producer offers can be compared "
+            "on their own. A campaign counts as an event when ANY of these hold: "
+            "its code is a discount family (BIN Sale, GoBig, BigDaddy, July4th, "
+            "LaborDay25…); its name contains BIN Sale / holiday sale / flash sale "
+            "/ clearance; or its code's Offer Type in the Producer - Discount Code "
+            "mapping sheet is 'holiday' or 'format promotion'. Producer offers that "
+            "merely feature large formats or a holiday theme under the producer's "
+            "own code are kept."
+        ),
     )
 
     # ── Metric Definitions ──────────────────────────────────────────────
@@ -1010,10 +1021,20 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
 
-# ─── Apply BIN/Holiday filter ─────────────────────────────────────────────────
-# Keep raw full_df for QA tab; filtered version used by Weekly/Monthly/Producer
+# ─── Apply event-campaign filter ──────────────────────────────────────────────
+# Keep raw full_df for QA tab; filtered version used by Weekly/Monthly/Producer.
+# Display-only: is_bin_holiday also drives the 3-day attribution window, so it
+# must not be widened — the event flag is derived here instead.
+EVENT_OFFER_TYPES = {"holiday", "format promotion"}
+
+_offer_type_map = data.get("offer_type_map") or load_offer_type_mapping(PRODUCER_CODE_EXCEL)
+_event_mask = (
+    (full_df["is_bin_holiday"] == True)
+    | (full_df["is_family_key"] == True)
+    | full_df["Discount Code"].astype(str).str.lower().map(_offer_type_map).isin(EVENT_OFFER_TYPES)
+)
 if exclude_bin_holiday:
-    display_df = full_df[full_df["is_bin_holiday"] != True].copy()
+    display_df = full_df[~_event_mask].copy()
 else:
     display_df = full_df
 
@@ -2067,6 +2088,7 @@ slim-down; and incrementality would require a holdout test.
 | **> 0** | Normal attributed result. |
 
 - Campaigns with fewer than **50 deliveries** are excluded from efficiency rankings.
+- The sidebar **event-campaign filter** hides BIN Sale, Large Format and Holiday campaigns: any campaign whose code is a discount family (BIN Sale, GoBig, BigDaddy, July4th, LaborDay25…), whose name contains BIN Sale / holiday sale / flash sale / clearance, or whose code has Offer Type `holiday` or `format promotion` in the mapping sheet. Producer offers using the producer's own code are kept even if themed (e.g. a large-format Las Cases offer). This filter changes what is shown only — never how revenue is attributed.
 - The **Producers tab** only includes finalized campaigns, resolves each discount code to a producer via the mapping spreadsheet, and excludes non-producer buckets (BIN Sale, Holiday, etc.) from producer rankings.
 - History rows for finalized campaigns are **frozen** — later pipeline runs never overwrite them.
 """)
