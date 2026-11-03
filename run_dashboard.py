@@ -23,6 +23,7 @@ from src.hubspot import fetch_campaigns, CampaignRecord
 from src.parser import ParsedCampaign
 from src.overrides import load_overrides, apply_overrides
 from src.shopify_orders import compute_attribution, compute_family_attribution, fetch_all_discount_codes_in_range
+from src.click_attribution import apply_click_attribution
 from src.families import load_family_mapping, is_family_key, get_family_identifiers
 from src.reports import (
     assemble_dashboard_rows,
@@ -176,6 +177,13 @@ def main():
             continue
         storage_key = f"{family_key.lower()}|{send_date}"
         attributions[storage_key] = attr
+
+    # Click-influenced secondary attribution (HubSpot click events → orders)
+    try:
+        apply_click_attribution(hubspot_token, main_records, attributions,
+                                all_orders, all_campaign_identifiers)
+    except Exception as exc:
+        print(f"  WARNING: click-influenced attribution skipped ({type(exc).__name__}): {exc}")
 
     print(f"  Attribution computed for {len(attributions)} discount code(s)")
     if attribution_failures:

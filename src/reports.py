@@ -57,6 +57,10 @@ class DashboardRow:
     influenced_orders: int | None = None
     influenced_offer_revenue: float | None = None
     influenced_total_sales: float | None = None
+    # Click-influenced (secondary attribution, additive to UTM-influenced):
+    # None = not computed (no code, family campaign, or click fetch failed)
+    click_influenced_orders: int | None = None
+    click_influenced_offer_revenue: float | None = None
     # Metadata
     is_final_snapshot: bool = False
     is_family_key: bool = False
@@ -165,6 +169,10 @@ def assemble_dashboard_rows(
                 row.influenced_offer_revenue = 0.0
                 row.influenced_total_sales = 0.0
 
+            if attr is not None and getattr(attr, "click_influenced_orders", None) is not None:
+                row.click_influenced_orders = attr.click_influenced_orders
+                row.click_influenced_offer_revenue = round(attr.click_influenced_offer_revenue, 2)
+
         # WINDOW_OPEN check
         if not row.is_final_snapshot and row.qa_bucket in ("OK", "OK_OVERRIDE"):
             row.qa_bucket = "WINDOW_OPEN"
@@ -201,6 +209,8 @@ def rows_to_dataframe(rows: list[DashboardRow]) -> pd.DataFrame:
             "Influenced Orders": r.influenced_orders,
             "Influenced Offer Revenue": r.influenced_offer_revenue,
             "Influenced Total Sales": r.influenced_total_sales,
+            "Click-Influenced Orders": r.click_influenced_orders,
+            "Click-Influenced Offer Revenue": r.click_influenced_offer_revenue,
             "Attribution Window Days": r.attribution_window_days,
             "Attribution Window End": r.attribution_window_end,
             "is_final_snapshot": r.is_final_snapshot,
@@ -507,6 +517,7 @@ def generate_weekly_report(df: pd.DataFrame, run_date: date) -> pd.DataFrame:
         "Discounted Orders", "Delivered", "Attributed Revenue",
         "Total Sales", "Revenue per Delivered",
         "Influenced Orders", "Influenced Offer Revenue", "Influenced Total Sales",
+        "Click-Influenced Orders", "Click-Influenced Offer Revenue",
     ]
     available = [c for c in cols if c in df.columns]
     weekly = df[available].copy()
@@ -1107,6 +1118,7 @@ HISTORY_COLUMNS = [
     "Attributed Revenue", "Discount Value", "Total Sales",
     "Discounted Orders", "Revenue per Delivered",
     "Influenced Orders", "Influenced Offer Revenue", "Influenced Total Sales",
+    "Click-Influenced Orders", "Click-Influenced Offer Revenue",
     "is_final_snapshot", "Run Date", "Attribution Window End",
     "QA Bucket", "HubSpot v3 Email ID", "HubSpot v1 Campaign ID",
 ]

@@ -49,6 +49,24 @@ locked primary metrics above.** Same null-vs-zero semantics apply.
 | **Influenced Offer Revenue** | Revenue from the offered wine's line items only, net of any discounts applied to those lines. Line match: every non-year token of the campaign's Producer/Topic appears in the line title, and at least one vintage year matches when the topic names vintages. | `SUM(line.price × qty − line discount allocations)` over matching lines | `null` if Code = None, EDU, or CONTENT |
 | **Influenced Total Sales** | Full order value of influenced orders (analog of Total Order Value). | `SUM(order.total_price)` | `null` if Code = None, EDU, or CONTENT |
 
+Line-match tokenization (updated 2026-11-03): accents are stripped, and a topic
+word may also match 2–3 adjacent title words joined together, so
+`2010 PontetCanet` matches `2010 Chateau Pontet-Canet` and `l'Oree` matches
+`l'Orée`. Before this fix such lines contributed $0 to offer revenue.
+
+### 1.5 Click-Influenced Metrics (Secondary Attribution — added 2026-11-03)
+
+Buyers who clicked the campaign email, then returned to the store another way
+(Google search, typed URL, other device) and bought the offered wine without
+the campaign code. The UTM rule (§5.5) only sees the first page of the buying
+session and misses them. **Separate columns, additive to §1.4 (no order is
+counted in both), never blended into the primary metrics.** See §5.6.
+
+| Metric | Definition | Formula | Null Condition |
+|---|---|---|---|
+| **Click-Influenced Orders** | Orders matching §5.6. | `COUNT` | `null` if Code = None, EDU, CONTENT, family (BIN) campaign, or the HubSpot click fetch failed for that campaign |
+| **Click-Influenced Offer Revenue** | Offered-wine line revenue on those orders, net of any discounts (same line match as Influenced Offer Revenue). | `SUM(line.price × qty − line discount allocations)` over matching lines | same as above |
+
 ---
 
 ## 2. Line-Item Attribution Logic
@@ -226,6 +244,32 @@ AND EXCLUSION:
 - An order code-attributed to the same campaign is counted once in primary metrics only.
 - Family (BIN Sale) campaigns do not compute influenced metrics — their automatic discounts apply to every qualifying order, so code/title attribution already captures email-driven orders.
 - Known limitation: `landing_site` records only the first session; cross-device conversions are missed. Influenced metrics are a floor, not a ceiling.
+
+### 5.6 Click-Influenced Secondary Match (added 2026-11-03)
+
+Implemented in `src/click_attribution.py`. For every standard (non-family)
+coded campaign, fetch HubSpot v1 CLICK events by `campaignId` (A/B versions
+sharing a code + send date are unioned). An order is **click-influenced** by a
+campaign IF, within the campaign's attribution window (same bounds as §5.2):
+
+```
+CLICK:     the order's customer email has a CLICK event on this campaign
+           with timestamp <= order.created_at
+OFFER:     the order contains >= 1 line matching the campaign's offered wine
+           (Influenced Offer Revenue line match, §1.4) with revenue > 0
+EXCLUSION: the order used NO known campaign code / automatic discount title
+           AND is not UTM-influenced (§5.5) for any campaign
+```
+
+- Single attribution: if an order qualifies for several campaigns, it is
+  assigned to the campaign whose email the buyer clicked most recently before
+  the order.
+- Non-campaign codes (`GrandCru`, `GCLA-*`, …) do not exclude an order.
+- Not computed (null) for family campaigns and when a campaign's click fetch
+  fails; 0 = computed, no matches.
+- Limitations: buyers checking out with a different email than the one that
+  received the campaign, and open-only readers, are not captured. A click is
+  evidence of interest, not proof the email caused the purchase.
 
 ---
 

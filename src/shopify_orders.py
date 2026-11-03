@@ -9,6 +9,7 @@ Supports two matching modes:
 
 import re
 import time
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass, field
 
@@ -79,6 +80,12 @@ class CampaignAttribution:
     influenced_offer_revenue: float = 0.0   # offer-wine lines only, net of any discounts applied
     influenced_total_sales: float = 0.0     # full order.total_price of influenced orders
     influenced_order_names: list[str] = field(default_factory=list)
+    # Click-influenced (secondary attribution, see click_attribution.py):
+    # buyer clicked this email, then bought the offered wine without any
+    # campaign code and without a UTM match. None = not computed.
+    click_influenced_orders: int | None = None
+    click_influenced_offer_revenue: float | None = None
+    click_influenced_order_names: list[str] = field(default_factory=list)
 
 
 # ─── UTM-influenced matching helpers ─────────────────────────────────────────
@@ -135,9 +142,27 @@ def _order_uses_campaign_identifier(order: dict, identifiers: set[str]) -> bool:
 
 
 def _tokenize_wine(text: str) -> set[str]:
-    """Lowercase, strip apostrophes/punctuation, split into tokens."""
+    """Lowercase, strip accents/apostrophes/punctuation, split into tokens."""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
     text = text.replace("'", "").replace("’", "").lower()
     return set(re.split(r"[^a-z0-9]+", text)) - {""}
+
+
+def _title_tokens(title: str) -> set[str]:
+    """
+    Tokens of a Shopify line title plus joins of 2-3 adjacent words, so a
+    campaign topic written as one word still matches a hyphenated or spaced
+    product name ("PontetCanet" vs "Pontet-Canet", "HautBrion" vs "Haut-Brion").
+    """
+    text = unicodedata.normalize("NFKD", title)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.replace("'", "").replace("’", "").lower()
+    words = [w for w in re.split(r"[^a-z0-9]+", text) if w]
+    tokens = set(words)
+    for n in (2, 3):
+        tokens.update("".join(words[i:i + n]) for i in range(len(words) - n + 1))
+    return tokens
 
 
 def _offer_line_revenue(order: dict, producer_topic: str) -> float:
@@ -146,7 +171,8 @@ def _offer_line_revenue(order: dict, producer_topic: str) -> float:
     (net of whatever discounts were applied to those lines).
 
     A line matches when every non-year token of producer_topic appears in
-    the line title, and (if the topic names vintages) at least one vintage
+    the line title (single words or 2-3 adjacent words joined, see
+    _title_tokens), and (if the topic names vintages) at least one vintage
     year also appears in the title.
     """
     if not producer_topic:
@@ -158,7 +184,7 @@ def _offer_line_revenue(order: dict, producer_topic: str) -> float:
     total = 0.0
     for item in order.get("line_items", []):
         title = item.get("title", "")
-        title_tokens = _tokenize_wine(title)
+        title_tokens = _title_tokens(title)
         if topic_words and not topic_words <= title_tokens:
             continue
         if topic_years and not (topic_years & title_tokens):

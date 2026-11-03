@@ -21,7 +21,7 @@ import altair as alt
 # Pipeline code version — bump on every deploy-relevant change. Displayed in
 # the sidebar so a stale-module deploy (Streamlit Cloud soft-reload keeping
 # old src/ modules) is immediately visible instead of masquerading as bad data.
-PIPELINE_VERSION = "2026-10-23.1"
+PIPELINE_VERSION = "2026-11-03.1"
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -48,6 +48,7 @@ from src.shopify_orders import (
     _normalize_code as _normalize_discount_code,
     _fetch_orders_in_window as _fetch_all_shopify_orders,
 )
+from src.click_attribution import apply_click_attribution
 from src.families import load_family_mapping, is_family_key, get_family_identifiers
 from src.reports import (
     assemble_dashboard_rows,
@@ -714,6 +715,14 @@ def run_pipeline() -> dict:
             storage_key = f"{family_key.lower()}|{send_date}"
             attributions[storage_key] = attr
 
+        # Click-influenced secondary attribution (HubSpot click events → orders)
+        status.update(label="Matching email clicks to orders...")
+        try:
+            apply_click_attribution(hubspot_token, main_records, attributions,
+                                    all_orders, all_campaign_identifiers)
+        except Exception as exc:
+            attribution_failures.append(("Click-influenced attribution", str(exc)))
+
         if attribution_failures:
             st.warning(
                 "Some campaigns could not be attributed and were skipped:\n\n"
@@ -1174,6 +1183,15 @@ with tab_weekly:
                         "value": f"${_inf_sales:,.2f}",
                         "sub": f"{_inf_orders:.0f} email-driven orders w/o code",
                     })
+            if "Click-Influenced Offer Revenue" in coded_week.columns:
+                _clk_rev = coded_week["Click-Influenced Offer Revenue"].dropna().sum()
+                _clk_orders = coded_week["Click-Influenced Orders"].dropna().sum()
+                if _clk_orders > 0:
+                    kpis.append({
+                        "label": "Click-Influenced",
+                        "value": f"${_clk_rev:,.2f}",
+                        "sub": f"{_clk_orders:.0f} clicked, returned later, bought offer w/o code",
+                    })
         render_kpi_row(kpis)
 
         spacer("lg")
@@ -1321,6 +1339,7 @@ with tab_weekly:
             "Discounted Orders", "Delivered", "Attributed Revenue",
             "Total Sales", "Revenue per Delivered", "Sales per Delivered",
             "Influenced Orders", "Influenced Offer Revenue", "Influenced Total Sales",
+            "Click-Influenced Orders", "Click-Influenced Offer Revenue",
         ]
         available = [c for c in display_cols if c in details_df.columns]
         st.dataframe(
@@ -1342,6 +1361,13 @@ with tab_weekly:
                 "Influenced Total Sales": st.column_config.NumberColumn(
                     "Infl. Total Sales", format="$%.2f",
                     help="Full order value of influenced orders"),
+                "Click-Influenced Orders": st.column_config.NumberColumn(
+                    "Click-Infl. Orders",
+                    help="Buyer clicked this email, then bought the offered wine without a campaign code "
+                         "and without a UTM match (e.g. came back via Google). Additive to Infl. Orders"),
+                "Click-Influenced Offer Revenue": st.column_config.NumberColumn(
+                    "Click-Infl. Offer Rev", format="$%.2f",
+                    help="Offered-wine line revenue on click-influenced orders. Additive to Infl. Offer Rev"),
             },
             use_container_width=True,
             hide_index=True,
@@ -2024,7 +2050,7 @@ An order belongs to a campaign when the campaign's **discount code appears on th
 """)
 
     spacer("md")
-    section_title("Secondary attribution — UTM-influenced", "The email drove the visit, but the code wasn't used")
+    section_title("Secondary attribution — UTM- and click-influenced", "The email drove the visit, but the code wasn't used")
 
     st.markdown("""
 Some buyers click a campaign email, land on the store, and complete a purchase **without using the campaign code** — for example, checking out with the generic `GrandCru` loyalty code instead. Code-based attribution alone misses these orders.
@@ -2049,7 +2075,20 @@ An order counts as **Influenced** when, inside the campaign's attribution window
 
 **Known limitations:**
 - `landing_site` only captures the **first session**. A buyer who clicks the email on their phone but orders later from a laptop won't be captured — Influenced numbers are a *floor*, not a ceiling.
-- Offer-wine line matching compares the campaign's Producer/Topic text against Shopify product titles; unusual naming mismatches can miss a line (the order still counts in Influenced Total Sales).
+- Offer-wine line matching compares the campaign's Producer/Topic text against Shopify product titles; unusual naming mismatches can miss a line (the order still counts in Influenced Total Sales). Run-together names match hyphenated titles (`PontetCanet` = `Pontet-Canet`) and accents are ignored.
+
+**Click-influenced (added 2026-11-03)** closes the first-session gap with HubSpot's own click records. An order counts as **Click-Influenced** when, inside the campaign's attribution window:
+
+- the buyer's checkout email **clicked this campaign's email before ordering**, **and**
+- the order contains **the offered wine**, **and**
+- it used no campaign code and was not already counted as UTM-influenced.
+
+| Metric | Definition |
+|---|---|
+| **Click-Influenced Orders** | Orders matching the rules above. If an order qualifies for several campaigns, it goes to the email clicked most recently before the order. |
+| **Click-Influenced Offer Revenue** | Revenue from the offered wine's line items on those orders (net of any discounts). |
+
+These are **additive** to the UTM-influenced columns (no order is in both) and are never blended into Attributed Revenue. Buyers who check out with a different email address than the one that received the campaign, or who only opened (never clicked), are still not captured.
 """)
 
     spacer("md")
