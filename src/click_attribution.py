@@ -73,11 +73,12 @@ def apply_click_attribution(
     Populate click_influenced_* on each standard (non-family) attribution in
     `attributions` (keyed "code|send_date", as built by the orchestrators).
     """
-    # One task per attribution key; A/B versions share a key, so union their ids.
+    # One task per attribution key; A/B versions share a key and one email can
+    # span several campaign ids, so union them all.
     tasks: dict[str, dict] = {}
     for rec in main_records:
         p = rec.parsed
-        if not p.discount_code or p.is_family_key or not rec.hubspot_v1_campaign_id:
+        if not p.discount_code or p.is_family_key or not rec.hubspot_v1_campaign_ids:
             continue
         key = f"{p.discount_code.lower()}|{p.parsed_send_date}"
         if key not in attributions:
@@ -88,7 +89,7 @@ def apply_click_attribution(
             "topic": p.producer_topic or "",
             "ids": set(),
         })
-        t["ids"].add(str(rec.hubspot_v1_campaign_id))
+        t["ids"].update(rec.hubspot_v1_campaign_ids)
 
     all_ids = set().union(*(t["ids"] for t in tasks.values())) if tasks else set()
     print(f"  Fetching HubSpot click events for {len(all_ids)} campaign email(s)...")

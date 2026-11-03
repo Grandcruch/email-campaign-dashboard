@@ -11,8 +11,8 @@ Deployment: Streamlit Cloud (password-gated).
 
 ## Data sources
 
-- **HubSpot v3** (`/marketing/v3/emails`) — authoritative `name`, `allEmailCampaignIds`, pagination by `publishDate`. Source of truth for campaign name.
-- **HubSpot v1** (`/email/public/v1/campaigns/{id}`) — delivery counters (`delivered`, `open`, `click`, `bounce`, `unsubscribed`). A campaign is only "sent" if at least one v1 ID resolves with `delivered > 0`.
+- **HubSpot v3** (`/marketing/v3/emails?includeStats=true`) — authoritative `name`, `allEmailCampaignIds`, pagination by `publishDate`, and delivery counters (`delivered`, `open`, `click`, `bounce`, `unsubscribed`). Source of truth for campaign name and delivery stats. A campaign is only "sent" if `delivered > 0`.
+- **HubSpot v1** (`/email/public/v1/campaigns/by-id`, `/email/public/v1/events`) — which campaign IDs exist, and recipient-level click/delivery events. One email can span several campaign IDs, and most IDs in `allEmailCampaignIds` do not exist. Never read delivery totals from a single ID.
 - **Shopify Admin REST** (`/admin/api/2025-01/orders.json`) — orders with `discount_applications` and `line_items[].discount_allocations`, fetched by date window per campaign.
 - **Shopify OAuth** client_credentials — 24h tokens, auto-refreshed in `src/auth.py`.
 - **Local files:** `campaign_overrides.csv` (manual overrides, gitignored), `discount_family_mapping.csv` (BIN Sale fan-out), `.env.txt` (secrets).
@@ -72,7 +72,7 @@ src/
   config.py                 # env loader, DATA_START_DATE, constants
   auth.py                   # ShopifyAuth + hubspot_headers
   parser.py                 # parse_campaign_name, normalise_date
-  hubspot.py                # fetch_campaigns (v3 → v1 resolve)
+  hubspot.py                # fetch_campaigns (v3 list with stats)
   overrides.py              # load_overrides, apply_overrides
   families.py               # discount family mapping loader
   shopify_orders.py         # compute_attribution, compute_family_attribution

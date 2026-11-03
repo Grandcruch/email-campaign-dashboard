@@ -1,13 +1,9 @@
 """
-hubspot.py — Fetch HubSpot email campaigns (v3) and delivery stats (v1).
+hubspot.py — Fetch HubSpot email campaigns and their delivery stats (v3).
 """
 
-import time
-import threading
-
-import requests
 from datetime import date, timedelta
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .auth import hubspot_headers
 from .parser import parse_campaign_name, ParsedCampaign
@@ -15,31 +11,11 @@ from .config import DATA_START_DATE
 from ._http_retry import get_with_retry
 
 V3_EMAILS_URL = "https://api.hubapi.com/marketing/v3/emails"
-V1_CAMPAIGN_URL = "https://api.hubapi.com/email/public/v1/campaigns"
+V1_CAMPAIGN_IDS_URL = "https://api.hubapi.com/email/public/v1/campaigns/by-id"
 
 # Must match dashboard.PIPELINE_VERSION — the dashboard compares them at
 # startup to detect Streamlit Cloud soft-reloads that keep stale src modules.
-MODULE_VERSION = "2026-11-03.1"
-
-
-# HubSpot private apps allow 110 requests / 10s. Resolving v1 stats runs on a
-# thread pool, so pace the combined request rate well under that ceiling —
-# from a datacenter host (Streamlit Cloud) unpaced parallel calls hit 429s,
-# which silently turned real campaigns into STATS_UNAVAILABLE.
-_MIN_V1_INTERVAL = 0.14  # seconds between v1 requests (~7/s)
-_v1_lock = threading.Lock()
-_v1_last_ts = 0.0
-
-
-def _throttled_v1_get(url: str, **kwargs) -> requests.Response:
-    """Rate-limited + retrying GET for the v1 campaign endpoint."""
-    global _v1_last_ts
-    with _v1_lock:
-        wait = _MIN_V1_INTERVAL - (time.monotonic() - _v1_last_ts)
-        if wait > 0:
-            time.sleep(wait)
-        _v1_last_ts = time.monotonic()
-    return get_with_retry(url, **kwargs)
+MODULE_VERSION = "2026-11-03.2"
 
 
 @dataclass
@@ -48,7 +24,10 @@ class CampaignRecord:
     parsed: ParsedCampaign
     # HubSpot IDs
     hubspot_v3_email_id: str = ""
-    hubspot_v1_campaign_id: str = ""
+    hubspot_v1_campaign_id: str = ""            # ids below, comma-joined for reports
+    # allEmailCampaignIds that really exist. One email can span several ids and
+    # most listed ids do not exist; the v1 events API rejects those with a 400.
+    hubspot_v1_campaign_ids: list[str] = field(default_factory=list)
     # Delivery stats
     delivered: int = 0
     opened: int = 0
@@ -68,7 +47,7 @@ def _fetch_v3_emails(token: str) -> list[dict]:
     headers = hubspot_headers(token)
     all_emails: list[dict] = []
     url = V3_EMAILS_URL
-    params: dict = {"limit": 100, "orderBy": "-publishDate"}
+    params: dict = {"limit": 100, "orderBy": "-publishDate", "includeStats": "true"}
 
     while True:
         resp = get_with_retry(url, headers=headers, params=params)
@@ -97,48 +76,38 @@ def _fetch_v3_emails(token: str) -> list[dict]:
     return all_emails
 
 
-def _resolve_v1_stats(token: str, campaign_ids: list[str]) -> tuple[dict | None, bool]:
-    """
-    Try each ID from allEmailCampaignIds in the v1 endpoint.
-
-    Returns (stats_or_None, request_failed). `request_failed` is True when a
-    lookup errored out (network/429/5xx after retries) rather than legitimately
-    returning no delivery data — callers must NOT mark those campaigns
-    STATS_UNAVAILABLE, since that silently drops real campaigns from the
-    dashboard and from the QA known-code set.
-    """
+def _fetch_existing_campaign_ids(token: str) -> set[str] | None:
+    """All v1 campaign ids that exist in the account. None if the fetch failed."""
     headers = hubspot_headers(token)
-    failed = False
-    for cid in campaign_ids:
-        try:
-            resp = _throttled_v1_get(
-                f"{V1_CAMPAIGN_URL}/{cid}",
-                headers=headers,
-            )
-            if resp.status_code == 404:
-                continue  # genuinely no such campaign — not a failure
-            if resp.status_code != 200:
-                failed = True
-                continue
+    existing: set[str] = set()
+    params: dict = {"limit": 1000}
+    try:
+        while True:
+            resp = get_with_retry(V1_CAMPAIGN_IDS_URL, headers=headers, params=params)
+            resp.raise_for_status()
             data = resp.json()
-            counters = data.get("counters", {})
-            if counters.get("delivered", 0) > 0:
-                return {"id": str(cid), "counters": counters, "name": data.get("name", "")}, False
-        except requests.RequestException:
-            failed = True
-            continue
-    return None, failed
+            existing.update(str(c.get("id")) for c in data.get("campaigns", []))
+            if not data.get("hasMore"):
+                return existing
+            params["offset"] = data.get("offset")
+    except Exception as exc:
+        print(f"  [hubspot] WARNING: campaign id list unavailable: {exc}")
+        return None
 
 
 def fetch_campaigns(token: str) -> list[CampaignRecord]:
     """
-    Main entry point: fetch v3 emails, parse names, resolve v1 stats.
+    Main entry point: fetch v3 emails with their stats and parse names.
     Returns list of CampaignRecord for all campaigns >= DATA_START_DATE.
+
+    Delivery stats are HubSpot's email-level totals, which cover every send of
+    the email. Reading a single v1 campaign id instead undercounts emails that
+    HubSpot split across several ids.
     """
     raw_emails = _fetch_v3_emails(token)
+    existing_ids = _fetch_existing_campaign_ids(token)
     records: list[CampaignRecord] = []
-    # Records whose v1 stats still need resolving: (record, allEmailCampaignIds)
-    pending: list[tuple[CampaignRecord, list]] = []
+    stats_failures: list[str] = []
 
     for email in raw_emails:
         name = email.get("name", "")
@@ -163,53 +132,32 @@ def fetch_campaigns(token: str) -> list[CampaignRecord]:
         )
         records.append(record)
 
-        # If parse failed (LEGACY_FORMAT, PARSE_ERROR), no stats needed (QA only)
+        all_ids = [str(i) for i in email.get("allEmailCampaignIds", [])]
+        record.hubspot_v1_campaign_ids = [i for i in all_ids if i in (existing_ids or ())]
+        record.hubspot_v1_campaign_id = ",".join(record.hubspot_v1_campaign_ids)
+
+        counters = (email.get("stats") or {}).get("counters") or {}
+        record.delivered = counters.get("delivered", 0)
+        record.opened = counters.get("open", 0)
+        record.clicked = counters.get("click", 0)
+        record.sent = counters.get("sent", 0)
+        record.bounced = counters.get("bounce", 0)
+        record.unsubscribed = counters.get("unsubscribed", 0)
+
+        # If parse failed (LEGACY_FORMAT, PARSE_ERROR), keep it for QA as-is
         if parsed.qa_bucket in ("PARSE_ERROR", "LEGACY_FORMAT"):
             continue
 
-        all_ids = email.get("allEmailCampaignIds", [])
-        if not all_ids:
+        if not counters and record.hubspot_v1_campaign_ids:
+            # Real campaign but HubSpot returned no stats — do NOT silently
+            # drop it as unsent. It stays in the main table and QA code set.
+            stats_failures.append(parsed.raw_name)
+        elif record.delivered == 0:
             parsed.qa_bucket = "STATS_UNAVAILABLE"
-            continue
-
-        pending.append((record, all_ids))
-
-    # Resolve v1 stats in parallel. Requests are globally throttled (see
-    # _throttled_v1_get) so the pool cannot exceed HubSpot's rate limit.
-    from concurrent.futures import ThreadPoolExecutor
-
-    def _resolve_one(item):
-        record, all_ids = item
-        stats, failed = _resolve_v1_stats(token, all_ids)
-        return record, stats, failed
-
-    stats_failures: list[str] = []
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        for record, v1, failed in pool.map(_resolve_one, pending):
-            if v1 is None:
-                if failed:
-                    # HubSpot was unreachable/rate-limited — do NOT silently
-                    # drop the campaign. Keep its bucket so it stays in the
-                    # main table and in the QA known-code set.
-                    stats_failures.append(record.parsed.raw_name)
-                else:
-                    record.parsed.qa_bucket = "STATS_UNAVAILABLE"
-                continue
-            counters = v1["counters"]
-            record.hubspot_v1_campaign_id = v1["id"]
-            record.delivered = counters.get("delivered", 0)
-            record.opened = counters.get("open", 0)
-            record.clicked = counters.get("click", 0)
-            record.sent = counters.get("sent", 0)
-            record.bounced = counters.get("bounce", 0)
-            record.unsubscribed = counters.get("unsubscribed", 0)
-            # Final check: delivered > 0 is the primary sent check
-            if record.delivered == 0:
-                record.parsed.qa_bucket = "STATS_UNAVAILABLE"
 
     print(f"  [hubspot] {len(records)} campaigns in scope (>= {DATA_START_DATE})")
     if stats_failures:
-        print(f"  [hubspot] WARNING: delivery stats unreachable for "
+        print(f"  [hubspot] WARNING: delivery stats missing for "
               f"{len(stats_failures)} campaign(s) — retained with 0 delivered:")
         for name in stats_failures[:10]:
             print(f"    - {name}")

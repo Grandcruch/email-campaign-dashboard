@@ -16,7 +16,7 @@ These definitions are final and must not be changed without explicit business ap
 | **Discount Value** | Actual dollar discount amount given to the customer on the discounted items. | `SUM(line_item.discount_allocations[campaign_app_index].amount)` across all matched orders | `null` if Code = None, EDU, or CONTENT |
 | **Total Order Value** | Full order value of all orders containing the campaign's discount code. Includes discounted items, non-discounted items, tax, and shipping. Uses `order.total_price`. | `SUM(order.total_price)` across all matched orders | `null` if Code = None, EDU, or CONTENT |
 | **Discounted Orders** | Count of orders that used the campaign's discount code within the attribution window. | `COUNT(matched_orders)` | `null` if Code = None, EDU, or CONTENT |
-| **Delivered** | Number of emails successfully delivered. | `counters.delivered` from HubSpot v1 campaign detail | Never null for eligible campaigns |
+| **Delivered** | Number of emails successfully delivered. | `stats.counters.delivered` from the HubSpot v3 email list (`includeStats=true`), the email-level total across all sends | Never null for eligible campaigns |
 | **Revenue per Delivered** | Revenue efficiency per delivered email. | `Attributed Revenue / Delivered` | `null` if Attributed Revenue is `null` |
 
 ### 1.2 Retired Metrics
@@ -178,7 +178,7 @@ ALL of the following must be true:
 | # | Rule | Implementation |
 |---|---|---|
 | 1 | Parsed name date >= 2026-03-18 | Filter after parsing |
-| 2 | Campaign has been sent | At least one v1 campaign ID from `allEmailCampaignIds` returns `counters.delivered > 0` |
+| 2 | Campaign has been sent | HubSpot v3 email stats report `counters.delivered > 0` |
 | 3 | Full new naming convention | All 5 segments parsed successfully. `LEGACY_FORMAT` and `PARSE_ERROR` campaigns go to QA excluded output only. |
 
 ### 4.2 Shopify Attribution Eligibility
@@ -248,8 +248,10 @@ AND EXCLUSION:
 ### 5.6 Click-Influenced Secondary Match (added 2026-11-03)
 
 Implemented in `src/click_attribution.py`. For every standard (non-family)
-coded campaign, fetch HubSpot v1 CLICK events by `campaignId` (A/B versions
-sharing a code + send date are unioned). An order is **click-influenced** by a
+coded campaign, fetch HubSpot v1 CLICK events by `campaignId` for every
+campaign ID of the email that exists (filtered through `/campaigns/by-id`,
+because the events API rejects IDs that do not exist). A/B versions sharing a
+code + send date are unioned. An order is **click-influenced** by a
 campaign IF, within the campaign's attribution window (same bounds as §5.2):
 
 ```
@@ -331,7 +333,7 @@ EXCLUSION: the order used NO known campaign code / automatic discount title
 | `OK_OVERRIDE` | Override applied from `campaign_overrides.csv` | Main table |
 | `PARSE_ERROR` | Name doesn't match expected format | QA excluded output |
 | `LEGACY_FORMAT` | Old naming convention (<5 segments) | QA excluded output |
-| `STATS_UNAVAILABLE` | No v1 campaign resolves with delivered > 0 | QA excluded output |
+| `STATS_UNAVAILABLE` | HubSpot v3 email stats show delivered = 0 | QA excluded output |
 | `DATE_OUT_OF_RANGE` | Parsed date < 2026-03-18 | Excluded silently |
 | `DUPLICATE_CODE_WARNING` | Same code in overlapping campaigns | Main table (flagged) |
 | `WINDOW_OPEN` | is_final_snapshot = false | Main table (marked incomplete) |
@@ -353,7 +355,10 @@ def compute_is_final(parsed_send_date: date, attribution_window_days: int, run_d
 ```
 
 - `false` → row is updated on each run
-- `true` → row is frozen forever
+- `true` → row is frozen forever (one approved exception: on 2026-11-03 the
+  delivery fields of frozen rows were corrected once, because the single-ID
+  lookup had undercounted emails split across several campaign IDs. Revenue
+  fields were not touched)
 
 ### 8.3 Upsert Rules
 
@@ -424,7 +429,7 @@ These are reported in the unmatched discount codes QA output with `possible_reas
     ├─ DATE_OUT_OF_RANGE ──> silently excluded
     |
     v
-[HubSpot v1 campaign stats] ──> resolve delivered, opened, clicked
+[HubSpot v3 email stats] ──> delivered, opened, clicked (email-level totals)
     |
     ├─ delivered = 0 (STATS_UNAVAILABLE) ──> QA excluded output
     |
