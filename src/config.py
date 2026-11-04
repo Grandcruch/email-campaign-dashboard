@@ -25,6 +25,7 @@ BIN_HOLIDAY_KEYWORDS = [
 
 KNOWN_NON_CAMPAIGN_CODE_PATTERNS = [
     "grandcru",       # new-user offer (exact, case-insensitive)
+    "lastchance",     # abandoned-cart automation, not an email offer
 ]
 KNOWN_NON_CAMPAIGN_CODE_PREFIXES = [
     "gcla-",          # auto-generated new-user codes
