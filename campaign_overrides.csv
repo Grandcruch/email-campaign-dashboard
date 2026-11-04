@@ -1,3 +1,18 @@
 hubspot_email_name,override_send_date,override_producer_topic,override_campaign_type,override_offer_value,override_discount_code,override_window_days,force_include,force_exclude,notes
 2026-0314 - BIN Sale - PROD - 10% - BinSale10,2026-03-14,,,,BINSALE_GROUP,,,,BIN Sale family: BinSale10 + BinSale12
 2026-0316 - BIN Sale Reminder - PROD - 10% - BinSale10,2026-03-16,,,,BINSALE_GROUP,,,,BIN Sale Reminder family: BinSale10 + BinSale12
+2026-0411 - 2009 Caymus Special Selection - EDU - 10% - Caymus,,,PROD,,,,,, EDU campaign with real discount code — override type to PROD for attribution
+2025-08-23 - Labor Day BIN Sale - EDU - LaborDay25,2025-08-23,Other - Holiday,EDU,10%,LaborDay25,7,true,,Labor Day 2025 BIN Sale. Name has 4 segments (no OfferValue) so parser rejects it. 7d window: orders run 2025-08-23..09-01 continuously.
+2025-08-24 - Labor Day BIN Sale Reminder 1 - EDU - LaborDay25,2025-08-24,Other - Holiday,EDU,10%,LaborDay25,7,true,,Labor Day 2025 BIN Sale reminder 1.
+2025-08-30 - Labor Day BIN Sale Final Reminder - EDU - LaborDay25,2025-08-30,Other - Holiday,EDU,10%,LaborDay25,7,true,,Labor Day 2025 BIN Sale final reminder.
+2025-12-01 - Cyber Monday BIN Sale Reminder - EDU - 10%/12%,2025-12-01,Other - Holiday,EDU,10%/12%,BINSALE_GROUP,3,true,,Name ends at OfferValue; code segment missing. Siblings 11-29 and 12-02 parse fine.
+2025_0610 Father's Day Sale,2025-06-10,Holiday Sale,EDU,10%,FathersDay25,7,true,,"Father's Day 2025 sale. Legacy name. Code FathersDay25 verified: 30 orders / $35,442 @ 10%."
+2025_0612 Father's Day Sale Reminder,2025-06-12,Holiday Sale,EDU,10%,FathersDay25,7,true,,Father's Day 2025 reminder.
+2025_0613 Father's Day Sale Reminder 2,2025-06-13,Holiday Sale,EDU,10%,FathersDay25,7,true,,Father's Day 2025 reminder 2.
+2025_0615 Father's Day,2025-06-15,Holiday Sale,EDU,10%,FathersDay25,7,true,,Father's Day 2025 final send.
+2026-06-28 - 4th of July Large Formats NEW - PROD - 10% - July4th,2025-06-28,,,,,,,,"Year typo: name says 2026, HubSpot publishDate is 2025-06-28. July4th code orders run 2025-06-28..07-05, confirming 2025."
+2026-06-21 - Summer Kickoff California Whites - PROD - 7% - Summer,2025-06-20,,,,,,,,"Year typo: name says 2026, HubSpot publishDate is 2025-06-20. Summer code orders run 2025-06-21..06-24."
+2025-05-13 - 2001 d'Yquem - PROD - 7% - Sauteurnes,,,,,Sauternes,,,,"Code typo in campaign name: 'Sauteurnes'. Shopify discount is 'Sauternes'. Was attributing $0 against $4,081 of real orders."
+2025_1210 Large Format Leoville Las Cases V1,2025-12-10,Leoville Las Cases,PROD,7%,LasCases,7,true,,Legacy 1-segment name. A/B pair with V2 (same code + send date) - grouping merges them.
+2025_1210 Large Format Leoville Las Cases V2,2025-12-10,Leoville Las Cases,PROD,7%,LasCases,7,true,,Legacy 1-segment name. A/B pair with V1.
+2026-01-03 - Large Format Bottles - EDU - 10% - GoBig,,,,,,9,,,"Sale ran 2026-01-03..01-11 (9d); default 7d window truncated $2,232 of real orders on day 8."

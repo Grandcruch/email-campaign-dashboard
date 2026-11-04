@@ -104,3 +104,7 @@ def load_env(filepath: str = ENV_FILE) -> dict:
         raise EnvironmentError(f"Missing required credentials: {missing}")
 
     return env
+
+# Event campaigns: an email sent within this many days of the previous email
+# with the same code belongs to the same event.
+EVENT_MAX_GAP_DAYS = 7

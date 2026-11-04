@@ -24,11 +24,14 @@ from src.parser import ParsedCampaign
 from src.overrides import load_overrides, apply_overrides
 from src.shopify_orders import compute_attribution, compute_family_attribution, fetch_all_discount_codes_in_range
 from src.click_attribution import apply_click_attribution
-from src.families import load_family_mapping, is_family_key, get_family_identifiers
+from src.families import load_family_mapping, is_family_key, get_family_identifiers, event_codes
+from src.producer_mapping import DISCOUNT_CODE_EXCEL, load_offer_type_mapping
+from src.shopify_orders import event_window_days
 from src.reports import (
     assemble_dashboard_rows,
     rows_to_dataframe,
     apply_ab_grouping,
+    apply_event_grouping,
     generate_weekly_report,
     generate_weekly_insights,
     generate_monthly_report,
@@ -133,6 +136,24 @@ def main():
     all_orders = _fetch_orders_in_window(shopify_auth, DATA_START_DATE, run_date)
     print(f"  {len(all_orders)} orders fetched")
 
+    # logic_spec 5.3 — map each code/family key to every send_date that uses
+    # it, so overlapping windows can resolve a single owner per order instead
+    # of each send counting the same order again.
+    sibling_dates: dict[str, list] = {}
+    for code, send_date, _w, _p in attribution_tasks:
+        sibling_dates.setdefault(code.lower(), []).append(send_date)
+    for family_key, send_date, _w in family_tasks:
+        sibling_dates.setdefault(family_key.lower(), []).append(send_date)
+    for k in sibling_dates:
+        sibling_dates[k] = sorted(set(sibling_dates[k]))
+    dupes = {k: v for k, v in sibling_dates.items() if len(v) > 1}
+    if dupes:
+        print(f"  [dedup] {len(dupes)} code(s) reused across sends — "
+              f"resolving to most recent preceding send (logic_spec 5.3)")
+
+    offer_type_map = load_offer_type_mapping(DISCOUNT_CODE_EXCEL)
+    event_code_set = event_codes(main_records, offer_type_map)
+
     seen = set()
 
     # Standard code attribution
@@ -145,10 +166,12 @@ def main():
         print(f"  Attributing: {code} (window: {send_date} + {window}d)...")
         try:
             attr = compute_attribution(
-                shopify_auth, code, send_date, window,
+                shopify_auth, code, send_date,
+                event_window_days(code, send_date, window, sibling_dates, event_code_set),
                 producer_topic=producer_topic,
                 all_campaign_identifiers=all_campaign_identifiers,
                 orders=all_orders,
+                sibling_send_dates=sibling_dates.get(code.lower()),
             )
         except Exception as exc:
             print(f"    SKIPPED ({type(exc).__name__}): {exc}")
@@ -168,8 +191,10 @@ def main():
         print(f"  Attributing family: {family_key} -> {title_ids} (window: {send_date} + {window}d)...")
         try:
             attr = compute_family_attribution(
-                shopify_auth, family_key, title_ids, send_date, window,
+                shopify_auth, family_key, title_ids, send_date,
+                event_window_days(family_key, send_date, window, sibling_dates, event_code_set),
                 orders=all_orders,
+                sibling_send_dates=sibling_dates.get(family_key.lower()),
             )
         except Exception as exc:
             print(f"    SKIPPED ({type(exc).__name__}): {exc}")
@@ -197,6 +222,7 @@ def main():
     df = rows_to_dataframe(dashboard_rows)
     pre_ab = len(df)
     df = apply_ab_grouping(df)
+    df = apply_event_grouping(df, offer_type_map)
     print(f"  Dashboard rows: {len(df)} ({pre_ab - len(df)} A/B groups merged)")
 
     # ── Step 6: Generate reports ─────────────────────────────────────────

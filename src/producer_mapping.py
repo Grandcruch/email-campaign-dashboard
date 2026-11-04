@@ -17,6 +17,12 @@ EXCLUDED_OFFER_TYPES = {
 }
 INCLUDED_OFFER_TYPES = {"standalone producer", "combo offer"}
 UNMAPPED_LABEL = "Unmapped — review in QA"
+# Offer types that mark a code as an event (BIN / large format / holiday).
+EVENT_OFFER_TYPES = {"holiday", "format promotion"}
+DISCOUNT_CODE_EXCEL = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "Producer - Discount Code Mapping - Copy.xlsx",
+)
 
 
 # Column → (top-level region, sub-region) for the Producer - Region sheet.

@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass, field
 
 from .auth import ShopifyAuth
-from .config import SHOPIFY_API_VERSION
+from .config import EVENT_MAX_GAP_DAYS, SHOPIFY_API_VERSION
 from ._http_retry import get_with_retry
 
 
@@ -236,6 +236,65 @@ def _fetch_orders_in_window(
     return all_orders
 
 
+def _order_created_date(order: dict) -> date | None:
+    """Store-local calendar date of an order, or None if unparseable."""
+    created = order.get("created_at") or ""
+    try:
+        dt = datetime.fromisoformat(created)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.date()
+
+
+def _owns_order(order: dict, send_date: date, sibling_send_dates: list[date]) -> bool:
+    """
+    logic_spec 5.3 / 5.4 — duplicate code resolution.
+
+    When one discount code is used by several sends with overlapping windows,
+    the order belongs to the campaign with the most recent send_date that
+    still precedes the order. Without this, every send whose window contains
+    the order counts it, and a 3-send event reports ~3x its real revenue.
+
+    Returns True when `send_date` is that owner. A `sibling_send_dates` list
+    of fewer than two entries means there is nothing to disambiguate.
+    """
+    if not sibling_send_dates or len(sibling_send_dates) < 2:
+        return True
+    od = _order_created_date(order)
+    if od is None:
+        return True
+    candidates = [sd for sd in sibling_send_dates if sd <= od]
+    if not candidates:
+        # Order predates every send of this code; fall back to the earliest so
+        # the order is still claimed exactly once rather than dropped.
+        return send_date == min(sibling_send_dates)
+    return send_date == max(candidates)
+
+
+def event_window_days(
+    code: str,
+    send_date: date,
+    window_days: int,
+    sibling_dates: dict[str, list[date]],
+    event_code_set: set[str],
+) -> int:
+    """
+    Attribution window for one send. An event email's window runs at least to
+    the next email of the event, so orders placed between two sends stay in
+    the event instead of falling into the gap.
+    """
+    if code.lower() not in event_code_set:
+        return window_days
+    later = [d for d in sibling_dates.get(code.lower(), []) if d > send_date]
+    if later:
+        gap = (min(later) - send_date).days
+        if gap <= EVENT_MAX_GAP_DAYS:
+            return max(window_days, gap)
+    return window_days
+
+
 def _order_in_window(order: dict, start_date: date, end_date: date) -> bool:
     """
     In-memory equivalent of the API window filter used by
@@ -402,6 +461,7 @@ def compute_attribution(
     producer_topic: str = "",
     all_campaign_identifiers: set[str] | None = None,
     orders: list[dict] | None = None,
+    sibling_send_dates: list[date] | None = None,
 ) -> CampaignAttribution:
     """
     Fetch orders in the attribution window and compute aggregated metrics
@@ -424,6 +484,9 @@ def compute_attribution(
             provided, the window is applied in-memory (identical bounds to
             the API filter) and no Shopify request is made — callers fetch
             the full order range once and reuse it for every campaign.
+        sibling_send_dates: every send_date that shares this discount code.
+            Enables logic_spec 5.3 duplicate-code resolution so an order is
+            claimed by exactly one send. Omit for single-send codes.
     """
     end_date = send_date + timedelta(days=window_days)
     if orders is None:
@@ -434,6 +497,11 @@ def compute_attribution(
     result = CampaignAttribution(discount_code=discount_code)
 
     for order in orders:
+        # Single attribution (logic_spec 5.4): a later send of the same code
+        # owns this order.
+        if not _owns_order(order, send_date, sibling_send_dates or []):
+            continue
+
         attr = _attribute_order(order, discount_code)
         if attr is not None:
             result.attributed_revenue += attr.attributed_revenue
@@ -465,6 +533,7 @@ def compute_family_attribution(
     send_date: date,
     window_days: int,
     orders: list[dict] | None = None,
+    sibling_send_dates: list[date] | None = None,
 ) -> CampaignAttribution:
     """
     Fetch orders in the attribution window and compute aggregated metrics
@@ -481,6 +550,8 @@ def compute_family_attribution(
         send_date: campaign send date
         window_days: attribution window length
         orders: optional pre-fetched order list (see compute_attribution)
+        sibling_send_dates: every send_date sharing this family key — see
+            compute_attribution. Enables logic_spec 5.3 resolution.
     """
     end_date = send_date + timedelta(days=window_days)
     if orders is None:
@@ -493,6 +564,11 @@ def compute_family_attribution(
     seen_order_ids: set[int] = set()
 
     for order in orders:
+        # Single attribution (logic_spec 5.4): a later send of the same family
+        # key owns this order.
+        if not _owns_order(order, send_date, sibling_send_dates or []):
+            continue
+
         # Try title-based matching first (automatic discounts)
         attr = _attribute_order_by_title(order, title_identifiers)
 

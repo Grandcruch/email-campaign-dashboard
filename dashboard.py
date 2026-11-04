@@ -21,7 +21,7 @@ import altair as alt
 # Pipeline code version — bump on every deploy-relevant change. Displayed in
 # the sidebar so a stale-module deploy (Streamlit Cloud soft-reload keeping
 # old src/ modules) is immediately visible instead of masquerading as bad data.
-PIPELINE_VERSION = "2026-11-03.2"
+PIPELINE_VERSION = "2026-11-03.3"
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -47,13 +47,16 @@ from src.shopify_orders import (
     fetch_all_discount_codes_in_range,
     _normalize_code as _normalize_discount_code,
     _fetch_orders_in_window as _fetch_all_shopify_orders,
+    event_window_days,
 )
 from src.click_attribution import apply_click_attribution
-from src.families import load_family_mapping, is_family_key, get_family_identifiers
+from src.families import load_family_mapping, is_family_key, get_family_identifiers, event_codes
 from src.reports import (
     assemble_dashboard_rows,
     rows_to_dataframe,
     apply_ab_grouping,
+    apply_event_grouping,
+    event_mask,
     generate_weekly_report,
     generate_weekly_insights,
     generate_monthly_report,
@@ -672,6 +675,19 @@ def run_pipeline() -> dict:
         # Attribution dict is keyed by "code|send_date" so each campaign
         # gets its own attribution result for its own window, even if
         # multiple campaigns share the same discount code / family key.
+        # logic_spec 5.3 — map each code/family key to every send_date that
+        # uses it, so overlapping windows resolve one owner per order.
+        sibling_dates: dict[str, list] = {}
+        for _c, _sd, _w, _p in attribution_tasks:
+            sibling_dates.setdefault(_c.lower(), []).append(_sd)
+        for _fk, _sd, _w in family_tasks:
+            sibling_dates.setdefault(_fk.lower(), []).append(_sd)
+        for _k in sibling_dates:
+            sibling_dates[_k] = sorted(set(sibling_dates[_k]))
+
+        offer_type_map = load_offer_type_mapping(PRODUCER_CODE_EXCEL)
+        event_code_set = event_codes(main_records, offer_type_map)
+
         seen = set()
 
         # Standard code attribution
@@ -684,10 +700,12 @@ def run_pipeline() -> dict:
             status.update(label=f"Attributing: {code}...")
             try:
                 attr = compute_attribution(
-                    shopify_auth, code, send_date, window,
+                    shopify_auth, code, send_date,
+                    event_window_days(code, send_date, window, sibling_dates, event_code_set),
                     producer_topic=producer_topic,
                     all_campaign_identifiers=all_campaign_identifiers,
                     orders=all_orders,
+                    sibling_send_dates=sibling_dates.get(code.lower()),
                 )
             except Exception as exc:
                 attribution_failures.append((f"{code} @ {send_date}", str(exc)))
@@ -706,8 +724,10 @@ def run_pipeline() -> dict:
             status.update(label=f"Attributing family: {family_key} ({len(title_ids)} codes)...")
             try:
                 attr = compute_family_attribution(
-                    shopify_auth, family_key, title_ids, send_date, window,
+                    shopify_auth, family_key, title_ids, send_date,
+                    event_window_days(family_key, send_date, window, sibling_dates, event_code_set),
                     orders=all_orders,
+                    sibling_send_dates=sibling_dates.get(family_key.lower()),
                 )
             except Exception as exc:
                 attribution_failures.append((f"{family_key} @ {send_date}", str(exc)))
@@ -737,6 +757,7 @@ def run_pipeline() -> dict:
         # Step 5b: Merge A/B test versions
         status.update(label="Merging A/B test campaigns...")
         df = apply_ab_grouping(df)
+        df = apply_event_grouping(df, offer_type_map)
 
         # Step 6: Reports
         status.update(label="Generating reports...")
@@ -748,7 +769,6 @@ def run_pipeline() -> dict:
         # Step 6b: Producer analytics (new)
         status.update(label="Loading producer mapping data...")
         producer_map = load_producer_mapping(PRODUCER_CODE_EXCEL)
-        offer_type_map = load_offer_type_mapping(PRODUCER_CODE_EXCEL)
         tier_map = load_tier_mapping(PRODUCER_PRODUCT_EXCEL)
         top_region_map, sub_region_map = load_region_mapping(PRODUCER_PRODUCT_EXCEL)
         producer_analytics = generate_producer_analytics(
@@ -1034,14 +1054,8 @@ with st.sidebar:
 # Keep raw full_df for QA tab; filtered version used by Weekly/Monthly/Producer.
 # Display-only: is_bin_holiday also drives the 3-day attribution window, so it
 # must not be widened — the event flag is derived here instead.
-EVENT_OFFER_TYPES = {"holiday", "format promotion"}
-
 _offer_type_map = data.get("offer_type_map") or load_offer_type_mapping(PRODUCER_CODE_EXCEL)
-_event_mask = (
-    (full_df["is_bin_holiday"] == True)
-    | (full_df["is_family_key"] == True)
-    | full_df["Discount Code"].astype(str).str.lower().map(_offer_type_map).isin(EVENT_OFFER_TYPES)
-)
+_event_mask = event_mask(full_df, _offer_type_map)
 if exclude_bin_holiday:
     display_df = full_df[~_event_mask].copy()
 else:
@@ -2023,6 +2037,7 @@ Every campaign name follows: `YYYY-MM-DD - Producer/Topic - Type - OfferValue - 
 - **Type** is one of `PROD` (sellable offer), `EDU` (educational), `CONTENT`, or `HYBR` (hybrid — EDU-style content to part of the audience, offer framing to the rest).
 - Campaigns **with a real discount code** are matched to Shopify orders; campaigns without one show delivery stats only.
 - A/B test versions and EDU/HYBR sibling sends of the same campaign (same code, same send date) are automatically **merged into one row** — delivery stats are summed, and the shared Shopify attribution is counted once.
+- **Events** (BIN Sale, large format and holiday campaigns) appear as **one row per event**, such as "BIN Sale (3 emails)". Emails with the same code join an event when each is sent within 7 days of the previous one. Each order counts once, including orders placed between emails. Delivered adds up all the emails, so someone who received three emails counts three times, and Rev/Delivered will look lower than a single offer.
 
 #### Attribution window
 

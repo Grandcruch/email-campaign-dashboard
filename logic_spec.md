@@ -219,6 +219,26 @@ If the same code appears in multiple campaigns with overlapping windows:
 2. Log `DUPLICATE_CODE_WARNING` for all affected campaigns
 3. Flag for manual review
 
+**Implementation (added 2026-08-24).** Rule 1 is enforced by
+`shopify_orders._owns_order(order, send_date, sibling_send_dates)`, called at
+the top of the order loop in both `compute_attribution` and
+`compute_family_attribution`. Callers build a `{code -> sorted send_dates}` map
+across all main-table campaigns and pass the matching list as
+`sibling_send_dates`; a list of fewer than two entries is a no-op, so
+single-send codes are unaffected.
+
+Edge case: an order predating every send of its code (possible when a code
+leaks early) is claimed by the **earliest** send rather than dropped, so order
+counts still reconcile.
+
+> **This was previously unenforced.** Until 2026-08-24 each send attributed
+> independently over its own window, so every send whose window contained an
+> order counted that order again. Multi-send events were inflated roughly in
+> proportion to their send count — the June 2026 Father's Day large-format
+> event reported $90,454 + $69,021 against a true event total of $90,454.
+> Per-send figures published before this date are **not** additive; event
+> totals from that period should be treated as overstated.
+
 ### 5.4 Single Attribution Only
 
 Each order is attributed to exactly one campaign (the one whose code matches). No multi-campaign attribution. No splitting.
@@ -272,6 +292,30 @@ EXCLUSION: the order used NO known campaign code / automatic discount title
 - Limitations: buyers checking out with a different email than the one that
   received the campaign, and open-only readers, are not captured. A click is
   evidence of interest, not proof the email caused the purchase.
+
+
+### 5.6 Event Campaigns (added 2026-11-03)
+
+An event is a BIN Sale, large-format or holiday campaign sent as a first email
+plus reminders. A campaign is an event when its code is a discount family, its
+name matches a BIN/holiday keyword, or its Offer Type in the mapping sheet is
+`holiday` or `format promotion`.
+
+Emails with the same code belong to one event when each is sent within
+`config.EVENT_MAX_GAP_DAYS` (7) of the previous email. Reporting shows **one row
+per event** (`reports.apply_event_grouping`), dated by the first email and named
+with the email count, e.g. `BIN Sale (2 emails)`.
+
+| Field | Rule |
+|---|---|
+| Revenue, sales, orders, discount, influenced metrics | Sum across the emails. Section 5.3 gives each order to one send, so the sum counts each order once. |
+| Delivered, Opened, Clicked | Sum across the emails. A person who received three emails counts three times. |
+| Revenue per Delivered | Recomputed from the summed values. |
+| Attribution window | First send to the last send's window end. `shopify_orders.event_window_days` extends each email's window to the next email, so orders between sends stay in the event. |
+| `is_final_snapshot` | True only when every email's window has closed. |
+
+The split of an event's revenue between its emails is not reported: it depends
+on which calendar day an order falls on and is not meaningful.
 
 ---
 
@@ -344,7 +388,10 @@ EXCLUSION: the order used NO known campaign code / automatic discount title
 
 ### 8.1 Unique Key
 
-`(parsed_send_date, discount_code, campaign_name)`
+`HubSpot v3 Email ID`. For merged rows this is the lowest ID in an A/B group
+and the first email's ID for an event, so renaming a campaign does not add a
+row. `(parsed_send_date, discount_code, campaign_name)` is only a fallback for
+rows with no email ID.
 
 ### 8.2 is_final_snapshot Logic
 
@@ -355,17 +402,18 @@ def compute_is_final(parsed_send_date: date, attribution_window_days: int, run_d
 ```
 
 - `false` → row is updated on each run
-- `true` → row is frozen forever (one approved exception: on 2026-11-03 the
-  delivery fields of frozen rows were corrected once, because the single-ID
-  lookup had undercounted emails split across several campaign IDs. Revenue
-  fields were not touched)
+- `true` → row is frozen forever (one approved exception: on 2026-11-03 history
+  was rebuilt once from the corrected pipeline output, fixing undercounted
+  delivery fields, double-counted revenue and duplicate rows, and collapsing
+  multi-email events into one row)
 
 ### 8.3 Upsert Rules
 
 | Existing Row? | is_final_snapshot | Action |
 |---|---|---|
 | No | — | INSERT with current metrics and `is_final_snapshot` based on window status |
-| Yes | `true` | SKIP (do not overwrite) |
+| Yes | `true`, and final in this run | SKIP (do not overwrite) |
+| Yes | `true`, but not final in this run | UPDATE: a new reminder reopened the event |
 | Yes | `false` | UPDATE with latest metrics; re-evaluate `is_final_snapshot` |
 
 ---

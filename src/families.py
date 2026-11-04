@@ -15,6 +15,7 @@ import os
 from dataclasses import dataclass
 
 from .config import PROJECT_ROOT
+from .producer_mapping import EVENT_OFFER_TYPES
 
 FAMILY_MAPPING_FILE = os.path.join(PROJECT_ROOT, "discount_family_mapping.csv")
 
@@ -69,3 +70,16 @@ def get_family_identifiers(
 ) -> list[FamilyMember]:
     """Get all Shopify identifiers for a family key."""
     return families.get(family_key.upper(), [])
+
+
+def event_codes(records: list, offer_type_map: dict[str, str]) -> set[str]:
+    """Lowercased codes of event campaigns: BIN, large format and holiday."""
+    codes: set[str] = set()
+    for rec in records:
+        p = rec.parsed
+        if not p.discount_code:
+            continue
+        code = p.discount_code.lower()
+        if p.is_family_key or p.is_bin_holiday or offer_type_map.get(code) in EVENT_OFFER_TYPES:
+            codes.add(code)
+    return codes

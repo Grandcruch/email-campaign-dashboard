@@ -28,8 +28,10 @@ from src.auth import ShopifyAuth, hubspot_headers
 from src.hubspot import fetch_campaigns
 from src.overrides import load_overrides, apply_overrides
 from src.shopify_orders import compute_attribution, compute_family_attribution, _fetch_orders_in_window
-from src.families import load_family_mapping, is_family_key, get_family_identifiers
-from src.reports import assemble_dashboard_rows, rows_to_dataframe, apply_ab_grouping
+from src.families import load_family_mapping, is_family_key, get_family_identifiers, event_codes
+from src.producer_mapping import DISCOUNT_CODE_EXCEL, load_offer_type_mapping
+from src.shopify_orders import event_window_days
+from src.reports import assemble_dashboard_rows, rows_to_dataframe, apply_ab_grouping, apply_event_grouping
 
 # ─── Output file name ────────────────────────────────────────────────────────
 OUTPUT_FILENAME = "Historical Email Offer Performance(2026.3.9~).csv"
@@ -118,6 +120,19 @@ def run_export():
     all_orders = _fetch_orders_in_window(shopify_auth, DATA_START_DATE, run_date)
     print(f"  {len(all_orders)} orders fetched")
 
+    # logic_spec 5.3 — map each code/family key to every send_date that
+    # uses it, so overlapping windows resolve one owner per order.
+    sibling_dates: dict[str, list] = {}
+    for _c, _sd, _w, _p in attribution_tasks:
+        sibling_dates.setdefault(_c.lower(), []).append(_sd)
+    for _fk, _sd, _w in family_tasks:
+        sibling_dates.setdefault(_fk.lower(), []).append(_sd)
+    for _k in sibling_dates:
+        sibling_dates[_k] = sorted(set(sibling_dates[_k]))
+
+    offer_type_map = load_offer_type_mapping(DISCOUNT_CODE_EXCEL)
+    event_code_set = event_codes(main_records, offer_type_map)
+
     seen = set()
 
     # Standard code attribution
@@ -130,10 +145,12 @@ def run_export():
         print(f"  Attributing: {code} (window: {send_date} + {window}d)...")
         try:
             attr = compute_attribution(
-                shopify_auth, code, send_date, window,
+                shopify_auth, code, send_date,
+                event_window_days(code, send_date, window, sibling_dates, event_code_set),
                 producer_topic=producer_topic,
                 all_campaign_identifiers=all_campaign_identifiers,
                 orders=all_orders,
+                sibling_send_dates=sibling_dates.get(code.lower()),
             )
         except Exception as exc:
             print(f"    SKIPPED ({type(exc).__name__}): {exc}")
@@ -153,8 +170,10 @@ def run_export():
         print(f"  Attributing family: {family_key} -> {title_ids} (window: {send_date} + {window}d)...")
         try:
             attr = compute_family_attribution(
-                shopify_auth, family_key, title_ids, send_date, window,
+                shopify_auth, family_key, title_ids, send_date,
+                event_window_days(family_key, send_date, window, sibling_dates, event_code_set),
                 orders=all_orders,
+                sibling_send_dates=sibling_dates.get(family_key.lower()),
             )
         except Exception as exc:
             print(f"    SKIPPED ({type(exc).__name__}): {exc}")
@@ -174,6 +193,7 @@ def run_export():
     dashboard_rows = assemble_dashboard_rows(records, attributions, run_date)
     df = rows_to_dataframe(dashboard_rows)
     df = apply_ab_grouping(df)
+    df = apply_event_grouping(df, offer_type_map)
     print(f"  Total dashboard rows: {len(df)}")
 
     # Filter to finalized campaigns only

@@ -16,10 +16,12 @@ import pandas as pd
 from .config import (
     OUTPUT_DIR,
     DATA_START_DATE,
+    EVENT_MAX_GAP_DAYS,
     KNOWN_NON_CAMPAIGN_CODE_PATTERNS,
     KNOWN_NON_CAMPAIGN_CODE_PREFIXES,
 )
 from .hubspot import CampaignRecord
+from .producer_mapping import EVENT_OFFER_TYPES
 from .shopify_orders import CampaignAttribution
 
 
@@ -228,104 +230,95 @@ def rows_to_dataframe(rows: list[DashboardRow]) -> pd.DataFrame:
     return df
 
 
-# ─── BIN Sale grouping ────────────────────────────────────────────────────────
+# ─── Event grouping ───────────────────────────────────────────────────────────
 
-def apply_bin_grouping(df: pd.DataFrame) -> pd.DataFrame:
+_EVENT_SUM_COLUMNS = [
+    "Delivered", "Opened", "Clicked",
+    "Attributed Revenue", "Discount Value", "Total Sales", "Order Subtotal",
+    "Discounted Orders", "Influenced Orders", "Influenced Offer Revenue",
+    "Influenced Total Sales", "Click-Influenced Orders",
+    "Click-Influenced Offer Revenue",
+]
+
+
+def event_mask(df: pd.DataFrame, offer_type_map: dict[str, str]) -> pd.Series:
+    """True for event campaigns: BIN, large format and holiday."""
+    code = df["Discount Code"].astype(str)
+    return (code != "None") & (
+        (df["is_bin_holiday"] == True)
+        | (df["is_family_key"] == True)
+        | code.str.lower().map(offer_type_map).isin(EVENT_OFFER_TYPES)
+    )
+
+
+def apply_event_grouping(df: pd.DataFrame, offer_type_map: dict[str, str]) -> pd.DataFrame:
     """
-    Combine BIN Sale + BIN Sale Reminder rows that share the same discount
-    family into a single reporting row.
+    Combine the emails of one event (first send + reminders) into one row.
 
-    Grouping key: (Discount Code, send_week_monday) where is_family_key=True.
-
-    For HubSpot metrics (Delivered, Opened, Clicked): SUM across group.
-    For Shopify metrics (Attributed Revenue, Total Sales, etc.): take the
-    values from the row with the latest Attribution Window End to avoid
-    double-counting from overlapping attribution windows.
-    Revenue per Delivered is recomputed from combined values.
-
-    Non-family rows pass through unchanged.
+    Emails belong together when they share a code and each is sent within
+    EVENT_MAX_GAP_DAYS of the previous one. Metrics are summed: attribution
+    gives each order to a single send, so the sum counts every order once.
+    Delivered is total deliveries across the emails. Run after A/B grouping.
     """
     if df.empty:
         return df.copy()
 
-    # If no is_family_key column or no family rows, return as-is
-    if "is_family_key" not in df.columns:
+    is_event = event_mask(df, offer_type_map)
+    if not is_event.any():
         return df.copy()
 
-    family_mask = df["is_family_key"] == True
-    if not family_mask.any():
-        return df.copy()
+    events = df[is_event].copy()
+    events["_send"] = pd.to_datetime(events["Parsed Send Date"])
+    events["_code"] = events["Discount Code"].astype(str).str.lower()
+    events.sort_values(["_code", "_send", "Campaign Name"], inplace=True)
+    new_group = (
+        (events["_code"] != events["_code"].shift())
+        | (events["_send"].diff().dt.days > EVENT_MAX_GAP_DAYS)
+    )
+    events["_event"] = new_group.cumsum()
 
-    non_family = df[~family_mask].copy()
-    family = df[family_mask].copy()
+    rows: list[dict] = []
+    for _, grp in events.groupby("_event", sort=False):
+        first = grp.iloc[0]
+        combined = first.to_dict()
+        if len(grp) > 1:
+            for col in _EVENT_SUM_COLUMNS:
+                if col in grp.columns:
+                    combined[col] = pd.to_numeric(grp[col], errors="coerce").sum(min_count=1)
 
-    grouped_rows = []
-    for code, grp in family.groupby("Discount Code"):
-        if len(grp) == 1:
-            # Single row — no grouping needed, pass through
-            grouped_rows.append(grp.iloc[0].to_dict())
-            continue
+            parts = first["Campaign Name"].split(" - ")
+            label = f"({len(grp)} emails)"
+            if len(parts) >= 2:
+                parts[1] = f"{parts[1]} {label}"
+                combined["Campaign Name"] = " - ".join(parts)
+            else:
+                combined["Campaign Name"] = f"{first['Campaign Name']} {label}"
+            combined["Campaign Type"] = "/".join(dict.fromkeys(grp["Campaign Type"]))
+            combined["Attribution Window End"] = grp["Attribution Window End"].max()
+            combined["Attribution Window Days"] = (
+                pd.to_datetime(combined["Attribution Window End"]) - first["_send"]
+            ).days
+            combined["is_final_snapshot"] = grp["is_final_snapshot"].all()
+            combined["is_bin_holiday"] = grp["is_bin_holiday"].any()
+            combined["is_family_key"] = grp["is_family_key"].any()
+            if (grp["QA Bucket"] == "WINDOW_OPEN").any():
+                combined["QA Bucket"] = "WINDOW_OPEN"
+            combined["HubSpot v1 Campaign ID"] = ",".join(
+                i for i in grp["HubSpot v1 Campaign ID"].astype(str) if i
+            )
+            combined["_event_grouped_from"] = " | ".join(grp["Campaign Name"])
 
-        # Sum HubSpot delivery metrics
-        total_delivered = grp["Delivered"].sum()
-        total_opened = grp["Opened"].sum()
-        total_clicked = grp["Clicked"].sum()
+            rev = combined.get("Attributed Revenue")
+            combined["Revenue per Delivered"] = (
+                round(rev / combined["Delivered"], 4)
+                if pd.notna(rev) and combined["Delivered"] > 0 else None
+            )
+        rows.append(combined)
 
-        # Sum Shopify metrics across all rows in the group.
-        # Each campaign has its own attribution window and its own separate
-        # Shopify API call, so order sets do not overlap.
-        rev_rows = grp[grp["Attributed Revenue"].notna()].copy()
-        if not rev_rows.empty:
-            attr_rev = rev_rows["Attributed Revenue"].sum()
-            total_sales = rev_rows["Total Sales"].sum()
-            discount_val = rev_rows["Discount Value"].sum()
-            disc_orders = rev_rows["Discounted Orders"].sum()
-        else:
-            attr_rev = None
-            total_sales = None
-            discount_val = None
-            disc_orders = None
-
-        # Recompute efficiency
-        rpd = None
-        if attr_rev is not None and total_delivered > 0:
-            rpd = round(attr_rev / total_delivered, 4)
-
-        # Build combined row from the first row as template
-        combined = grp.iloc[0].to_dict()
-        campaign_names = sorted(grp["Campaign Name"].unique())
-        earliest_date = grp["Parsed Send Date"].min()
-
-        combined["Campaign Name"] = f"{earliest_date} BIN Sale Group ({code})"
-        combined["Parsed Send Date"] = earliest_date
-        combined["Delivered"] = total_delivered
-        combined["Opened"] = total_opened
-        combined["Clicked"] = total_clicked
-        combined["Attributed Revenue"] = attr_rev
-        combined["Total Sales"] = total_sales
-        combined["Discount Value"] = discount_val
-        combined["Discounted Orders"] = disc_orders
-        combined["Revenue per Delivered"] = rpd
-        combined["Attribution Window End"] = grp["Attribution Window End"].max()
-        combined["is_final_snapshot"] = grp["is_final_snapshot"].all()
-        combined["_grouped_from"] = " | ".join(campaign_names)
-
-        grouped_rows.append(combined)
-
-    if grouped_rows:
-        grouped_df = pd.DataFrame(grouped_rows)
-        # Drop temp columns
-        for col in ["_send_dt", "_week_monday", "_awe"]:
-            if col in grouped_df.columns:
-                grouped_df.drop(columns=[col], inplace=True)
-        result = pd.concat([non_family, grouped_df], ignore_index=True)
-    else:
-        result = non_family.copy()
-
-    if not result.empty:
-        result.sort_values(["Parsed Send Date", "Campaign Name"], ascending=[False, True], inplace=True)
-        result.reset_index(drop=True, inplace=True)
-
+    grouped = pd.DataFrame(rows).drop(columns=["_send", "_code", "_event"])
+    result = pd.concat([df[~is_event], grouped], ignore_index=True)
+    result.sort_values(["Parsed Send Date", "Campaign Name"], ascending=[False, True], inplace=True)
+    result.reset_index(drop=True, inplace=True)
     return result
 
 
@@ -489,6 +482,10 @@ def apply_ab_grouping(df: pd.DataFrame) -> pd.DataFrame:
         combined["Attribution Window End"] = grp["Attribution Window End"].max()
         combined["is_final_snapshot"] = grp["is_final_snapshot"].all()
         combined["_ab_grouped_from"] = " | ".join(sorted(names))
+        combined["HubSpot v3 Email ID"] = min(str(i) for i in grp["HubSpot v3 Email ID"])
+        combined["HubSpot v1 Campaign ID"] = ",".join(
+            i for i in grp["HubSpot v1 Campaign ID"].astype(str) if i
+        )
         merged_rows.append(combined)
 
     merged_df = pd.DataFrame(merged_rows)
@@ -1127,8 +1124,10 @@ HISTORY_COLUMNS = [
 def update_history(new_df: pd.DataFrame) -> pd.DataFrame:
     """
     Load existing history, upsert new rows.
-    - Skip rows where is_final_snapshot is already True
-    - Update rows where is_final_snapshot is False
+    - Rows are identified by HubSpot email id, so renames do not add rows
+    - Skip rows that are final both in history and in this run
+    - Update every other existing row, including a final event row that a
+      new reminder has reopened
     - Insert new rows
     """
     if os.path.isfile(HISTORY_FILE):
@@ -1142,6 +1141,9 @@ def update_history(new_df: pd.DataFrame) -> pd.DataFrame:
 
     # Build composite key
     def make_key(row):
+        email_id = str(row.get("HubSpot v3 Email ID") or "").strip()
+        if email_id and email_id.lower() != "nan":
+            return email_id
         return f"{row.get('Parsed Send Date', '')}|{row.get('Discount Code', '')}|{row.get('Campaign Name', '')}"
 
     # Index existing history by key
@@ -1158,8 +1160,8 @@ def update_history(new_df: pd.DataFrame) -> pd.DataFrame:
 
         if key in existing_keys:
             hist_idx = existing_keys[key]
-            # If already final, skip
-            if str(history.at[hist_idx, "is_final_snapshot"]).lower() == "true":
+            if (str(history.at[hist_idx, "is_final_snapshot"]).lower() == "true"
+                    and str(new_row_dict.get("is_final_snapshot")).lower() == "true"):
                 continue
             # Update in place
             for col in HISTORY_COLUMNS:
