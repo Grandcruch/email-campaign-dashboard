@@ -21,7 +21,7 @@ import altair as alt
 # Pipeline code version — bump on every deploy-relevant change. Displayed in
 # the sidebar so a stale-module deploy (Streamlit Cloud soft-reload keeping
 # old src/ modules) is immediately visible instead of masquerading as bad data.
-PIPELINE_VERSION = "2026-11-16.1"
+PIPELINE_VERSION = "2026-11-17.1"
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -50,6 +50,7 @@ from src.shopify_orders import (
     event_window_days,
 )
 from src.click_attribution import apply_click_attribution
+from src.recipient_gate import apply_recipient_gate
 from src.families import load_family_mapping, is_family_key, get_family_identifiers, event_codes
 from src.reports import (
     assemble_dashboard_rows,
@@ -735,6 +736,18 @@ def run_pipeline() -> dict:
             storage_key = f"{family_key.lower()}|{send_date}"
             attributions[storage_key] = attr
 
+        # Email-recipient rule for automatic discounts (logic_spec 5.7)
+        status.update(label="Checking automatic-discount buyers against email recipients...")
+        try:
+            apply_recipient_gate(hubspot_token, main_records, attributions)
+            for key in apply_recipient_gate.last_failures:
+                attribution_failures.append(
+                    (f"Recipient check ({key})",
+                     "HubSpot delivery records unavailable - every buyer counted"))
+        except Exception as exc:
+            attribution_failures.append(
+                ("Recipient check", f"{exc} - every buyer counted for automatic discounts"))
+
         # Click-influenced secondary attribution (HubSpot click events → orders)
         status.update(label="Matching email clicks to orders...")
         try:
@@ -1354,6 +1367,7 @@ with tab_weekly:
             "Total Sales", "Revenue per Delivered", "Sales per Delivered",
             "Influenced Orders", "Influenced Offer Revenue", "Influenced Total Sales",
             "Click-Influenced Orders", "Click-Influenced Offer Revenue",
+            "All-Buyer Orders", "All-Buyer Revenue",
         ]
         available = [c for c in display_cols if c in details_df.columns]
         st.dataframe(
@@ -1382,6 +1396,14 @@ with tab_weekly:
                 "Click-Influenced Offer Revenue": st.column_config.NumberColumn(
                     "Click-Infl. Offer Rev", format="$%.2f",
                     help="Offered-wine line revenue on click-influenced orders. Additive to Infl. Offer Rev"),
+                "All-Buyer Orders": st.column_config.NumberColumn(
+                    "All-Buyer Orders",
+                    help="Every order that used the discount, including automatic-discount buyers who were "
+                         "not sent this email. Same as Discounted Orders for typed codes"),
+                "All-Buyer Revenue": st.column_config.NumberColumn(
+                    "All-Buyer Revenue", format="$%.2f",
+                    help="Attributed Revenue before excluding automatic-discount buyers who were not sent "
+                         "this email. Context only, not credited to the email"),
             },
             use_container_width=True,
             hide_index=True,
@@ -2060,6 +2082,8 @@ An order belongs to a campaign when the campaign's **discount code appears on th
 | **Sales per Delivered** | Total Sales ÷ Delivered. |
 
 **BIN Sale campaigns** apply automatic discounts (e.g. `BinSale10` + `BinSale12`) instead of typed codes, so they're matched by discount *title* across the whole family and de-duplicated so no order is counted twice.
+
+**Automatic discounts count email recipients only (added 2026-11-17).** An automatic discount applies itself to anyone who visits the page, including shoppers who never got the email. So an order that used an **automatic** discount counts toward the campaign only if the buyer's checkout email was **sent that offer's email before ordering** (any email of the same offer, for BIN Sale / Large Format events with reminders). Orders with a typed code always count. **All-Buyer Orders / All-Buyer Revenue** show the offer's results across every buyer, for context; they are not credited to the email.
 
 **Single attribution:** each order is credited to exactly **one** campaign.
 """)

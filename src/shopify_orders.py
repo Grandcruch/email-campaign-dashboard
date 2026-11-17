@@ -61,6 +61,12 @@ class OrderAttribution:
     total_line_items: int = 0
     financial_status: str = ""
     matched_identifier: str = ""         # which code/title matched
+    is_automatic: bool = False           # matched via an automatic discount, not a typed code
+    customer_email: str = ""             # lowercase; used by recipient_gate
+
+
+def _customer_email(order: dict) -> str:
+    return ((order.get("customer") or {}).get("email") or order.get("email") or "").lower()
 
 
 @dataclass
@@ -86,6 +92,10 @@ class CampaignAttribution:
     click_influenced_orders: int | None = None
     click_influenced_offer_revenue: float | None = None
     click_influenced_order_names: list[str] = field(default_factory=list)
+    # Before the recipient rule (recipient_gate.py) removed automatic-discount
+    # orders from people who were not sent the email. None = gate not run.
+    all_buyer_orders: int | None = None
+    all_buyer_revenue: float | None = None
 
 
 # ─── UTM-influenced matching helpers ─────────────────────────────────────────
@@ -364,6 +374,8 @@ def _attribute_order(order: dict, campaign_code: str) -> OrderAttribution | None
         order_subtotal=_subtotal,
         financial_status=order.get("financial_status", ""),
         matched_identifier=campaign_code,
+        is_automatic=not typed,
+        customer_email=_customer_email(order),
     )
 
     line_items = order.get("line_items", [])
@@ -418,11 +430,13 @@ def _attribute_order_by_title(
     # Find matching discount_application indices
     matched_app_indices: list[int] = []
     matched_title = ""
+    any_automatic = False
     for i, app in enumerate(order.get("discount_applications", [])):
         app_title = (app.get("title") or "").lower()
         if app_title in titles_lower:
             matched_app_indices.append(i)
             matched_title = app.get("title", "")
+            any_automatic = any_automatic or app.get("type") == "automatic"
 
     if not matched_app_indices:
         return None
@@ -441,6 +455,8 @@ def _attribute_order_by_title(
         order_subtotal=_subtotal,
         financial_status=order.get("financial_status", ""),
         matched_identifier=matched_title,
+        is_automatic=any_automatic,
+        customer_email=_customer_email(order),
     )
 
     line_items = order.get("line_items", [])

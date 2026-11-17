@@ -24,6 +24,7 @@ from src.parser import ParsedCampaign
 from src.overrides import load_overrides, apply_overrides
 from src.shopify_orders import compute_attribution, compute_family_attribution, fetch_all_discount_codes_in_range
 from src.click_attribution import apply_click_attribution
+from src.recipient_gate import apply_recipient_gate
 from src.families import load_family_mapping, is_family_key, get_family_identifiers, event_codes
 from src.producer_mapping import DISCOUNT_CODE_EXCEL, load_offer_type_mapping
 from src.shopify_orders import event_window_days
@@ -202,6 +203,15 @@ def main():
             continue
         storage_key = f"{family_key.lower()}|{send_date}"
         attributions[storage_key] = attr
+
+    # Email-recipient rule for automatic discounts (logic_spec 5.7)
+    try:
+        apply_recipient_gate(hubspot_token, main_records, attributions)
+        if apply_recipient_gate.last_failures:
+            print(f"  WARNING: recipient check failed, all buyers counted for: "
+                  f"{', '.join(apply_recipient_gate.last_failures)}")
+    except Exception as exc:
+        print(f"  WARNING: recipient check skipped ({type(exc).__name__}): {exc}")
 
     # Click-influenced secondary attribution (HubSpot click events → orders)
     try:

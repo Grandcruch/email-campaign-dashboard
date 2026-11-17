@@ -63,6 +63,11 @@ class DashboardRow:
     # None = not computed (no code, family campaign, or click fetch failed)
     click_influenced_orders: int | None = None
     click_influenced_offer_revenue: float | None = None
+    # Every buyer who used the discount, before the email-recipient rule
+    # (logic_spec 5.7) removed automatic-discount orders from non-recipients.
+    # Equal to Discounted Orders / Attributed Revenue for typed-code offers.
+    all_buyer_orders: int | None = None
+    all_buyer_revenue: float | None = None
     # Metadata
     is_final_snapshot: bool = False
     is_family_key: bool = False
@@ -175,6 +180,13 @@ def assemble_dashboard_rows(
                 row.click_influenced_orders = attr.click_influenced_orders
                 row.click_influenced_offer_revenue = round(attr.click_influenced_offer_revenue, 2)
 
+            if attr is None:
+                row.all_buyer_orders = 0
+                row.all_buyer_revenue = 0.0
+            elif getattr(attr, "all_buyer_orders", None) is not None:
+                row.all_buyer_orders = attr.all_buyer_orders
+                row.all_buyer_revenue = round(attr.all_buyer_revenue, 2)
+
         # WINDOW_OPEN check
         if not row.is_final_snapshot and row.qa_bucket in ("OK", "OK_OVERRIDE"):
             row.qa_bucket = "WINDOW_OPEN"
@@ -213,6 +225,8 @@ def rows_to_dataframe(rows: list[DashboardRow]) -> pd.DataFrame:
             "Influenced Total Sales": r.influenced_total_sales,
             "Click-Influenced Orders": r.click_influenced_orders,
             "Click-Influenced Offer Revenue": r.click_influenced_offer_revenue,
+            "All-Buyer Orders": r.all_buyer_orders,
+            "All-Buyer Revenue": r.all_buyer_revenue,
             "Attribution Window Days": r.attribution_window_days,
             "Attribution Window End": r.attribution_window_end,
             "is_final_snapshot": r.is_final_snapshot,
@@ -237,7 +251,7 @@ _EVENT_SUM_COLUMNS = [
     "Attributed Revenue", "Discount Value", "Total Sales", "Order Subtotal",
     "Discounted Orders", "Influenced Orders", "Influenced Offer Revenue",
     "Influenced Total Sales", "Click-Influenced Orders",
-    "Click-Influenced Offer Revenue",
+    "Click-Influenced Offer Revenue", "All-Buyer Orders", "All-Buyer Revenue",
 ]
 
 
@@ -515,6 +529,7 @@ def generate_weekly_report(df: pd.DataFrame, run_date: date) -> pd.DataFrame:
         "Total Sales", "Revenue per Delivered",
         "Influenced Orders", "Influenced Offer Revenue", "Influenced Total Sales",
         "Click-Influenced Orders", "Click-Influenced Offer Revenue",
+        "All-Buyer Orders", "All-Buyer Revenue",
     ]
     available = [c for c in cols if c in df.columns]
     weekly = df[available].copy()
@@ -1116,6 +1131,7 @@ HISTORY_COLUMNS = [
     "Discounted Orders", "Revenue per Delivered",
     "Influenced Orders", "Influenced Offer Revenue", "Influenced Total Sales",
     "Click-Influenced Orders", "Click-Influenced Offer Revenue",
+    "All-Buyer Orders", "All-Buyer Revenue",
     "is_final_snapshot", "Run Date", "Attribution Window End",
     "QA Bucket", "HubSpot v3 Email ID", "HubSpot v1 Campaign ID",
 ]

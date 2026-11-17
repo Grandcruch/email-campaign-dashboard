@@ -67,6 +67,18 @@ counted in both), never blended into the primary metrics.** See §5.6.
 | **Click-Influenced Orders** | Orders matching §5.6. | `COUNT` | `null` if Code = None, EDU, CONTENT, family (BIN) campaign, or the HubSpot click fetch failed for that campaign |
 | **Click-Influenced Offer Revenue** | Offered-wine line revenue on those orders, net of any discounts (same line match as Influenced Offer Revenue). | `SUM(line.price × qty − line discount allocations)` over matching lines | same as above |
 
+### 1.6 All-Buyer Metrics (context — added 2026-11-17)
+
+What the offer sold to every buyer, before §5.7 removed automatic-discount
+orders from people who were not sent the email. **Context only — not credited
+to the email and never used in rankings.** For typed-code campaigns they equal
+Discounted Orders / Attributed Revenue.
+
+| Metric | Definition | Null Condition |
+|---|---|---|
+| **All-Buyer Orders** | Discounted Orders before §5.7. | `null` if Code = None, EDU, CONTENT, or the recipient rule did not run |
+| **All-Buyer Revenue** | Attributed Revenue before §5.7. | same as above |
+
 ---
 
 ## 2. Line-Item Attribution Logic
@@ -202,6 +214,7 @@ MATCH IF:
     (   lower(order.discount_codes[].code) == lower(campaign.discount_code)
      OR an order.discount_applications[] entry with type == "automatic" has
         lower(title) == lower(campaign.discount_code)        -- added 2026-11-16
+        (automatic matches are then subject to §5.7, added 2026-11-17)
     )
     AND order.created_at >= campaign.parsed_send_date (at 00:00:00)
     AND order.created_at < campaign.parsed_send_date + attribution_window_days (at 00:00:00)
@@ -319,6 +332,40 @@ with the email count, e.g. `BIN Sale (2 emails)`.
 
 The split of an event's revenue between its emails is not reported: it depends
 on which calendar day an order falls on and is not meaningful.
+
+
+### 5.7 Automatic Discounts Count Email Recipients Only (added 2026-11-17)
+
+Approved by the business 2026-11-17. An automatic discount applies itself to
+anyone who reaches the page, so it does not show the buyer saw the email.
+Implemented in `src/recipient_gate.py`, applied after §5.1–5.6 and before the
+secondary metrics.
+
+```
+For each order matched to a campaign through an AUTOMATIC discount
+(discount_applications[].type == "automatic", title == code / family identifier):
+    KEEP only if lower(order.customer.email or order.email) has a HubSpot
+    DELIVERED event, at or before order.created_at, on any v1 campaign id of
+      - the send that owns the order (§5.3), or
+      - an earlier send of the same code / family key in the same chain of
+        sends no more than EVENT_MAX_GAP_DAYS apart (event reminders, §5.6)
+    otherwise DROP it from Attributed Revenue, Discount Value, Total Order
+    Value, Order Subtotal and Discounted Orders.
+Orders with a TYPED code are never gated.
+```
+
+- "Received" = delivered, not opened: opens miss readers whose email app blocks
+  tracking images, and Apple Mail reports some opens automatically. On the
+  first two offers checked (Bubbles 2026-11-14, Schrader 2026-11-07) the two
+  rules differed by one order.
+- Applies to every automatic-discount campaign, past and future, including BIN
+  Sale and Large Format families, so events stay comparable. Pre-rule totals
+  remain visible as All-Buyer metrics (§1.6).
+- Matching is by email address. A recipient who checks out with a different
+  email than the one HubSpot sent to is not counted, so the gated figures are a
+  floor.
+- If the HubSpot delivered-events fetch fails for an offer, that offer is left
+  ungated (every buyer counted) and the run reports a warning.
 
 ---
 
