@@ -319,8 +319,10 @@ def _order_in_window(order: dict, start_date: date, end_date: date) -> bool:
 def _attribute_order(order: dict, campaign_code: str) -> OrderAttribution | None:
     """
     Compute line-item level attribution for a single order.
-    Matches by discount_codes[].code (standard discount code campaigns).
-    Returns None if the campaign code is not found in this order's discount codes.
+    Matches the campaign code as a typed discount code, or as an automatic
+    discount whose title equals the code (offers set up as automatic
+    discounts never appear in discount_codes[]).
+    Returns None if the order used neither.
 
     attributed_revenue = NET SALES of discounted items:
         For each matched line item:  price × quantity − discount_allocation amount
@@ -330,16 +332,22 @@ def _attribute_order(order: dict, campaign_code: str) -> OrderAttribution | None
     # Shopify strips apostrophes from codes, so normalize both sides.
     norm_campaign = _normalize_code(campaign_code)
     order_codes = [_normalize_code(c.get("code", "")) for c in order.get("discount_codes", [])]
-    if norm_campaign not in order_codes:
-        return None
+    typed = norm_campaign in order_codes
 
     # Find the discount_application_index for the campaign code
     campaign_app_index = None
     for i, app in enumerate(order.get("discount_applications", [])):
-        if (app.get("type") == "discount_code"
-                and _normalize_code(app.get("code", "")) == norm_campaign):
+        if typed:
+            match = (app.get("type") == "discount_code"
+                     and _normalize_code(app.get("code", "")) == norm_campaign)
+        else:
+            match = (app.get("type") == "automatic"
+                     and _normalize_code(app.get("title") or "") == norm_campaign)
+        if match:
             campaign_app_index = i
             break
+    if not typed and campaign_app_index is None:
+        return None
 
     # current_subtotal_price = merchandise total net of discounts, excl tax/shipping
     # Prefer current_subtotal_price_set.shop_money.amount, fall back to current_subtotal_price

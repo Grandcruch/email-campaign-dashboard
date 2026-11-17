@@ -22,7 +22,7 @@ Deployment: Streamlit Cloud (password-gated).
 **Line-item level, net of discount.** For each campaign with a valid code and PROD type:
 
 1. Fetch Shopify orders where `created_at` ∈ `[send_date, send_date + window)` (window = 7 days, or 3 days if the name/producer matches BIN / holiday / flash / clearance keywords).
-2. For each order, find `i = index of discount_applications[] where type=="discount_code" and code==campaign_code` (case-insensitive).
+2. For each order, find `i = index of discount_applications[] where type=="discount_code" and code==campaign_code` (case-insensitive). If the code was not typed, an `automatic` discount whose `title` equals the campaign code also matches (offers set up as automatic discounts, e.g. `Bubbles` 2026-11-14).
 3. For each `line_item`, if any `discount_allocations[]` entry has `discount_application_index == i`, the line is attributed:
    - **Attributed Revenue** += `line_item.price * quantity - discount_allocations[i].amount` (net of the campaign discount on that line).
    - **Discount Value** += `discount_allocations[i].amount`.

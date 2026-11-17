@@ -21,7 +21,7 @@ import altair as alt
 # Pipeline code version — bump on every deploy-relevant change. Displayed in
 # the sidebar so a stale-module deploy (Streamlit Cloud soft-reload keeping
 # old src/ modules) is immediately visible instead of masquerading as bad data.
-PIPELINE_VERSION = "2026-11-03.4"
+PIPELINE_VERSION = "2026-11-16.1"
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -2048,7 +2048,7 @@ Orders are matched to a campaign if they were created within **7 days** of the s
     section_title("Primary attribution — discount code", "The buyer used the campaign's code at checkout")
 
     st.markdown("""
-An order belongs to a campaign when the campaign's **discount code appears on the order**. Within a matched order, only the line items that the code was applied to count toward Attributed Revenue.
+An order belongs to a campaign when the campaign's **discount code appears on the order**, either typed at checkout or as an automatic discount with the same name. Within a matched order, only the line items that the code was applied to count toward Attributed Revenue.
 
 | Metric | Definition |
 |---|---|

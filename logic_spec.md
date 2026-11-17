@@ -199,7 +199,10 @@ Campaigns with `campaign_type = EDU` or `CONTENT` or `discount_code = null`:
 
 ```
 MATCH IF:
-    lower(order.discount_codes[].code) == lower(campaign.discount_code)
+    (   lower(order.discount_codes[].code) == lower(campaign.discount_code)
+     OR an order.discount_applications[] entry with type == "automatic" has
+        lower(title) == lower(campaign.discount_code)        -- added 2026-11-16
+    )
     AND order.created_at >= campaign.parsed_send_date (at 00:00:00)
     AND order.created_at < campaign.parsed_send_date + attribution_window_days (at 00:00:00)
 ```
