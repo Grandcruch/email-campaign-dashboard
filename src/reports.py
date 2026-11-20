@@ -68,6 +68,13 @@ class DashboardRow:
     # Equal to Discounted Orders / Attributed Revenue for typed-code offers.
     all_buyer_orders: int | None = None
     all_buyer_revenue: float | None = None
+    # True when the offer used an automatic discount (any matched order)
+    automatic_discount: bool = False
+    # New vs existing customers (logic_spec 1.7): split of Attributed Revenue.
+    # None = not attempted (no code) or split unavailable.
+    new_customer_orders: int | None = None
+    new_customer_revenue: float | None = None
+    existing_customer_revenue: float | None = None
     # Metadata
     is_final_snapshot: bool = False
     is_family_key: bool = False
@@ -187,6 +194,21 @@ def assemble_dashboard_rows(
                 row.all_buyer_orders = attr.all_buyer_orders
                 row.all_buyer_revenue = round(attr.all_buyer_revenue, 2)
 
+            row.automatic_discount = bool(getattr(attr, "automatic_discount", False))
+
+            # New vs existing customers — Existing is Attributed minus New
+            # (both rounded) so the two always add up to Attributed Revenue.
+            if attr is None or not attr.discounted_orders:
+                if attr is None or getattr(attr, "new_customer_orders", None) is not None:
+                    row.new_customer_orders = 0
+                    row.new_customer_revenue = 0.0
+                    row.existing_customer_revenue = 0.0
+            elif getattr(attr, "new_customer_revenue", None) is not None:
+                row.new_customer_orders = attr.new_customer_orders
+                row.new_customer_revenue = round(attr.new_customer_revenue, 2)
+                row.existing_customer_revenue = round(
+                    row.attributed_revenue - row.new_customer_revenue, 2)
+
         # WINDOW_OPEN check
         if not row.is_final_snapshot and row.qa_bucket in ("OK", "OK_OVERRIDE"):
             row.qa_bucket = "WINDOW_OPEN"
@@ -227,6 +249,10 @@ def rows_to_dataframe(rows: list[DashboardRow]) -> pd.DataFrame:
             "Click-Influenced Offer Revenue": r.click_influenced_offer_revenue,
             "All-Buyer Orders": r.all_buyer_orders,
             "All-Buyer Revenue": r.all_buyer_revenue,
+            "Automatic Discount": r.automatic_discount,
+            "New Customer Orders": r.new_customer_orders,
+            "New Customer Revenue": r.new_customer_revenue,
+            "Existing Customer Revenue": r.existing_customer_revenue,
             "Attribution Window Days": r.attribution_window_days,
             "Attribution Window End": r.attribution_window_end,
             "is_final_snapshot": r.is_final_snapshot,
@@ -252,6 +278,7 @@ _EVENT_SUM_COLUMNS = [
     "Discounted Orders", "Influenced Orders", "Influenced Offer Revenue",
     "Influenced Total Sales", "Click-Influenced Orders",
     "Click-Influenced Offer Revenue", "All-Buyer Orders", "All-Buyer Revenue",
+    "New Customer Orders", "New Customer Revenue", "Existing Customer Revenue",
 ]
 
 
@@ -315,6 +342,8 @@ def apply_event_grouping(df: pd.DataFrame, offer_type_map: dict[str, str]) -> pd
             combined["is_final_snapshot"] = grp["is_final_snapshot"].all()
             combined["is_bin_holiday"] = grp["is_bin_holiday"].any()
             combined["is_family_key"] = grp["is_family_key"].any()
+            if "Automatic Discount" in grp.columns:
+                combined["Automatic Discount"] = bool(grp["Automatic Discount"].any())
             if (grp["QA Bucket"] == "WINDOW_OPEN").any():
                 combined["QA Bucket"] = "WINDOW_OPEN"
             combined["HubSpot v1 Campaign ID"] = ",".join(

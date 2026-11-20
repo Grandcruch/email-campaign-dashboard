@@ -63,10 +63,35 @@ class OrderAttribution:
     matched_identifier: str = ""         # which code/title matched
     is_automatic: bool = False           # matched via an automatic discount, not a typed code
     customer_email: str = ""             # lowercase; used by recipient_gate
+    customer_id: str = ""                # Shopify customer id; used by customer_history
+    # Attributed line items (the lines the campaign discount applied to):
+    # dicts with product_id, title, sku, quantity, net_revenue, discount.
+    # Their net_revenue sums to attributed_revenue. Used by the producer
+    # product view; never changes any campaign total.
+    lines: list = field(default_factory=list)
+    # True = first-ever Shopify order of this customer (customer_history.py).
+    # None = not classified.
+    is_new_customer: bool | None = None
 
 
 def _customer_email(order: dict) -> str:
     return ((order.get("customer") or {}).get("email") or order.get("email") or "").lower()
+
+
+def _customer_id(order: dict) -> str:
+    cid = (order.get("customer") or {}).get("id")
+    return str(cid) if cid else ""
+
+
+def _line_detail(item: dict, net_revenue: float, discount: float) -> dict:
+    return {
+        "product_id": item.get("product_id"),
+        "title": item.get("title") or item.get("name") or "",
+        "sku": item.get("sku") or "",
+        "quantity": int(item.get("quantity", 1)),
+        "net_revenue": net_revenue,
+        "discount": discount,
+    }
 
 
 @dataclass
@@ -96,6 +121,14 @@ class CampaignAttribution:
     # orders from people who were not sent the email. None = gate not run.
     all_buyer_orders: int | None = None
     all_buyer_revenue: float | None = None
+    # True when any matched order (before the recipient rule) used an
+    # automatic discount rather than a typed code.
+    automatic_discount: bool = False
+    # New vs existing customers (customer_history.py, logic_spec 1.7).
+    # Split of attributed_revenue; None = split not computed.
+    new_customer_orders: int | None = None
+    new_customer_revenue: float | None = None
+    existing_customer_revenue: float | None = None
 
 
 # ─── UTM-influenced matching helpers ─────────────────────────────────────────
@@ -376,6 +409,7 @@ def _attribute_order(order: dict, campaign_code: str) -> OrderAttribution | None
         matched_identifier=campaign_code,
         is_automatic=not typed,
         customer_email=_customer_email(order),
+        customer_id=_customer_id(order),
     )
 
     line_items = order.get("line_items", [])
@@ -391,6 +425,7 @@ def _attribute_order(order: dict, campaign_code: str) -> OrderAttribution | None
                     attr.attributed_revenue += item_gross - alloc_amount  # net sales
                     attr.discount_value += alloc_amount
                     attr.discounted_line_items += 1
+                    attr.lines.append(_line_detail(item, item_gross - alloc_amount, alloc_amount))
                     break  # only count each item once
     else:
         # Fallback: discount_application entry not found (shouldn't happen, but safe)
@@ -400,6 +435,12 @@ def _attribute_order(order: dict, campaign_code: str) -> OrderAttribution | None
         attr.attributed_revenue = gross - discounts  # net sales
         attr.discount_value = discounts
         attr.discounted_line_items = len(line_items)
+        # Product detail: every line, net of its own discounts. Can differ
+        # slightly from the order-level proxy above (e.g. shipping discounts).
+        for item in line_items:
+            item_gross = float(item.get("price", 0)) * int(item.get("quantity", 1))
+            allocs = sum(float(a.get("amount", 0)) for a in item.get("discount_allocations", []))
+            attr.lines.append(_line_detail(item, item_gross - allocs, allocs))
 
     return attr
 
@@ -457,6 +498,7 @@ def _attribute_order_by_title(
         matched_identifier=matched_title,
         is_automatic=any_automatic,
         customer_email=_customer_email(order),
+        customer_id=_customer_id(order),
     )
 
     line_items = order.get("line_items", [])
@@ -472,6 +514,7 @@ def _attribute_order_by_title(
                 attr.attributed_revenue += item_gross - alloc_amount  # net sales
                 attr.discount_value += alloc_amount
                 attr.discounted_line_items += 1
+                attr.lines.append(_line_detail(item, item_gross - alloc_amount, alloc_amount))
                 break  # only count each item once per discount application
 
     return attr

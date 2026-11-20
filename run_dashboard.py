@@ -25,6 +25,7 @@ from src.overrides import load_overrides, apply_overrides
 from src.shopify_orders import compute_attribution, compute_family_attribution, fetch_all_discount_codes_in_range
 from src.click_attribution import apply_click_attribution
 from src.recipient_gate import apply_recipient_gate
+from src.customer_history import apply_new_customer_split
 from src.families import load_family_mapping, is_family_key, get_family_identifiers, event_codes
 from src.producer_mapping import DISCOUNT_CODE_EXCEL, load_offer_type_mapping
 from src.shopify_orders import event_window_days
@@ -204,6 +205,10 @@ def main():
         storage_key = f"{family_key.lower()}|{send_date}"
         attributions[storage_key] = attr
 
+    # Flag offers that used an automatic discount (before the recipient rule)
+    for _attr in attributions.values():
+        _attr.automatic_discount = any(o.is_automatic for o in _attr.matched_orders)
+
     # Email-recipient rule for automatic discounts (logic_spec 5.7)
     try:
         apply_recipient_gate(hubspot_token, main_records, attributions)
@@ -212,6 +217,12 @@ def main():
                   f"{', '.join(apply_recipient_gate.last_failures)}")
     except Exception as exc:
         print(f"  WARNING: recipient check skipped ({type(exc).__name__}): {exc}")
+
+    # New vs existing customers (logic_spec 1.7)
+    try:
+        apply_new_customer_split(shopify_auth, attributions, all_orders, DATA_START_DATE)
+    except Exception as exc:
+        print(f"  WARNING: new vs existing customer split skipped ({type(exc).__name__}): {exc}")
 
     # Click-influenced secondary attribution (HubSpot click events → orders)
     try:

@@ -24,7 +24,7 @@ import altair as alt
 # Pipeline code version — bump on every deploy-relevant change. Displayed in
 # the sidebar so a stale-module deploy (Streamlit Cloud soft-reload keeping
 # old src/ modules) is immediately visible instead of masquerading as bad data.
-PIPELINE_VERSION = "2026-11-20.1"
+PIPELINE_VERSION = "2026-11-20.2"
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -54,6 +54,8 @@ from src.shopify_orders import (
 )
 from src.click_attribution import apply_click_attribution
 from src.recipient_gate import apply_recipient_gate
+from src.customer_history import apply_new_customer_split
+from src.products import attribution_lines_frame
 from src.families import load_family_mapping, is_family_key, get_family_identifiers, event_codes
 from src.reports import (
     assemble_dashboard_rows,
@@ -79,6 +81,7 @@ from src.producer_mapping import (
     load_tier_mapping,
     load_region_mapping,
     resolve_producer,
+    UNMAPPED_LABEL,
 )
 
 
@@ -408,7 +411,10 @@ CAMPAIGN_CSV_COLUMNS = [
 ]
 # (source column, CSV header) — appended after the columns above, in order.
 CAMPAIGN_CSV_APPENDED = [
-    ("Clicked", "Clicks"),
+    ("Clicked", "Clicks"),                                       # 2026-11-20 (Phase 1)
+    ("New Customer Orders", "New Customer Orders"),              # 2026-11-20 (Phase 2)
+    ("New Customer Revenue", "New Customer Revenue"),
+    ("Existing Customer Revenue", "Existing Customer Revenue"),
 ]
 
 
@@ -488,6 +494,107 @@ def compute_benchmarks(full: pd.DataFrame, offer_type_map: dict) -> dict:
     d = pd.to_datetime(o["Parsed Send Date"]).dt.date
     o = o[(d >= BENCHMARK_START) & (d <= BENCHMARK_END)]
     return {k: float(g["rate_per_1000"].median()) for k, g in o.groupby("day_type") if len(g) >= 10}
+
+
+# ─── Producer products (Producers tab) ──────────────────────────────────────
+
+_FEATURED_LABELS = {True: "Yes", False: "No"}
+
+
+def render_producer_products(producer: str, data: dict, run_date: date):
+    """Which wines earned a producer's attributed revenue (finalized campaigns).
+
+    Built from the attributed line items, so it adds up to the producer's
+    Attributed Revenue. 'Featured' = the wine's vintage is named in the
+    campaign name (logic_spec 6.6)."""
+    lines = data.get("product_lines")
+    if lines is None or lines.empty:
+        st.info("Product detail appears after the next data refresh.")
+        return
+
+    pmap = data.get("producer_map", {})
+    code_to_producer = {c: (resolve_producer(c, pmap) or UNMAPPED_LABEL) for c in lines["code_key"].unique()}
+    sel = lines[lines["code_key"].map(code_to_producer) == producer].copy()
+    sel = sel[sel["window_end"].notna() & (sel["window_end"].apply(lambda d: d <= run_date))]
+    section_title("Products", f"Wines sold through {producer}'s campaign discounts · finalized campaigns")
+    if sel.empty:
+        st.info(f"No attributed sales for {producer} in finalized campaigns.")
+        return
+
+    sel["campaign_key"] = sel["code_key"] + "|" + sel["send_date"]
+    total = sel["net_revenue"].sum()
+    feat = sel.loc[sel["featured"] == True, "net_revenue"].sum()
+    other = sel.loc[sel["featured"] == False, "net_revenue"].sum()
+    named = sel["featured"].notna().any()
+    new_rev = sel.loc[sel["is_new_customer"] == True, "net_revenue"].sum()
+
+    prod = sel.groupby(["title", "vintage", "size"], dropna=False).agg(
+        Units=("quantity", "sum"),
+        Orders=("order_id", "nunique"),
+        Revenue=("net_revenue", "sum"),
+        Campaigns=("campaign_key", "nunique"),
+        _feat_yes=("featured", lambda s: bool((s == True).any())),
+        _feat_known=("featured", lambda s: bool(s.notna().any())),
+    ).reset_index()
+    prod["Featured in Email"] = [
+        "Yes" if y else ("No" if k else "—") for y, k in zip(prod["_feat_yes"], prod["_feat_known"])
+    ]
+    prod = prod.drop(columns=["_feat_yes", "_feat_known"]).sort_values("Revenue", ascending=False)
+
+    render_kpi_row([
+        {"label": "Attributed Revenue", "value": fmt_money(total), "exact": exact_money(total),
+         "sub": f"{len(prod)} products · {fmt_count(sel['quantity'].sum())} units"},
+        {"label": "Featured Vintages", "value": fmt_money(feat) if named else "—",
+         "exact": exact_money(feat) if named else "",
+         "sub": (f"{feat / total:.0%} · vintage named in the email" if named and total
+                 else "Emails didn't name a vintage")},
+        {"label": "Other Vintages", "value": fmt_money(other) if named else "—",
+         "exact": exact_money(other) if named else "",
+         "sub": (f"{other / total:.0%} · same producer, not named" if named and total else "")},
+        {"label": "New-Customer Revenue", "value": fmt_money(new_rev), "exact": exact_money(new_rev),
+         "sub": f"{new_rev / total:.0%} of this producer" if total else ""},
+    ])
+    spacer("sm")
+
+    show_all = show_all_toggle(len(prod), f"producer_products_show_all_{producer}", noun="products")
+    top, rest = split_top_n(prod, "Revenue", show_all=show_all)
+    bar = alt.Chart(top).mark_bar(cornerRadiusEnd=3).encode(
+        y=alt.Y("title:N", sort="-x", title=None, axis=alt.Axis(labelLimit=420, labelOverlap=False)),
+        x=alt.X("Revenue:Q", title="Attributed Revenue ($)", axis=alt.Axis(format="$,.0f")),
+        color=alt.Color(
+            "Featured in Email:N",
+            scale=alt.Scale(domain=["Yes", "No", "—"], range=[CLR_PRODUCER, CLR_TEAL, CLR_TEXT_MUTED]),
+            legend=alt.Legend(title="Featured in email", orient="top"),
+        ),
+        tooltip=[
+            alt.Tooltip("title:N", title="Product"),
+            alt.Tooltip("Revenue:Q", title="Attributed Revenue", format="$,.2f"),
+            alt.Tooltip("Units:Q", format=",.0f"),
+            alt.Tooltip("Orders:Q", format=",.0f"),
+            alt.Tooltip("Campaigns:Q", format=",.0f"),
+            alt.Tooltip("Featured in Email:N"),
+        ],
+    ).properties(height=max(len(top) * 30, 120) + 40)   # +40: legend on top
+    st.altair_chart(styled_chart(bar), width="stretch")
+    rest_caption(rest, "Revenue", total, "products")
+
+    st.dataframe(
+        prod.rename(columns={"title": "Product", "vintage": "Vintage", "size": "Size"}),
+        column_config={
+            "Product": st.column_config.TextColumn("Product", width="large"),
+            "Revenue": st.column_config.NumberColumn("Attr. Revenue", format="$%.2f"),
+            "Units": st.column_config.NumberColumn("Units", format="%d"),
+        },
+        height=min(38 * (len(prod) + 1), 360),
+        width="stretch",
+        hide_index=True,
+    )
+    st.caption(
+        "Revenue here counts only the bottles the campaign discount applied to, net of the discount, so "
+        "it adds up to the producer's Attributed Revenue. **Featured in email** = the wine's vintage "
+        "appears in the campaign name (Yes), a campaign named other vintages (No), or no vintage was "
+        "named (—). Codes work across the producer, so buyers often pick a different vintage."
+    )
 
 
 def section_title(title: str, subtitle: str = ""):
@@ -946,6 +1053,11 @@ def run_pipeline() -> dict:
             storage_key = f"{family_key.lower()}|{send_date}"
             attributions[storage_key] = attr
 
+        # Flag offers that used an automatic discount, before the recipient
+        # rule can drop those orders (Campaigns tab, automatic-discount view)
+        for _attr in attributions.values():
+            _attr.automatic_discount = any(o.is_automatic for o in _attr.matched_orders)
+
         # Email-recipient rule for automatic discounts (logic_spec 5.7)
         status.update(label="Checking automatic-discount buyers against email recipients...")
         try:
@@ -957,6 +1069,30 @@ def run_pipeline() -> dict:
         except Exception as exc:
             attribution_failures.append(
                 ("Recipient check", f"{exc} - every buyer counted for automatic discounts"))
+
+        # New vs existing customers (logic_spec 1.7) — after the recipient
+        # rule, so only orders credited to the email are split
+        status.update(label="Splitting revenue into new and existing customers...")
+        try:
+            apply_new_customer_split(shopify_auth, attributions, all_orders, DATA_START_DATE)
+        except Exception as exc:
+            attribution_failures.append(
+                ("New vs existing customer split", f"{exc} - those columns are left blank"))
+
+        # Attributed line items for the Producers tab product view
+        _topics_by_key: dict[str, str] = {}
+        _window_end_by_key: dict = {}
+        for rec in main_records:
+            p = rec.parsed
+            if not p.discount_code:
+                continue
+            _k = f"{p.discount_code.lower()}|{p.parsed_send_date}"
+            if p.producer_topic and p.producer_topic not in _topics_by_key.get(_k, ""):
+                _topics_by_key[_k] = " / ".join(filter(None, [_topics_by_key.get(_k), p.producer_topic]))
+            if p.attribution_window_end:
+                _window_end_by_key[_k] = max(p.attribution_window_end,
+                                             _window_end_by_key.get(_k, p.attribution_window_end))
+        product_lines = attribution_lines_frame(attributions, _topics_by_key, _window_end_by_key)
 
         # Click-influenced secondary attribution (HubSpot click events → orders)
         status.update(label="Matching email clicks to orders...")
@@ -1045,6 +1181,7 @@ def run_pipeline() -> dict:
         "producer_current_df": producer_current_df,
         "producer_final_df": producer_final_df,
         "producer_analytics": producer_analytics,
+        "product_lines": product_lines,
         "producer_map": producer_map,
         "offer_type_map": offer_type_map,
         "attribution_failures": attribution_failures,
@@ -1113,7 +1250,7 @@ def _check_password() -> bool:
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
         password = st.text_input("Password", type="password", placeholder="Enter dashboard password")
-        if st.button("Sign in", type="primary", use_container_width=True):
+        if st.button("Sign in", type="primary", width="stretch"):
             if password == correct_pw:
                 st.session_state["authenticated"] = True
                 st.rerun()
@@ -1199,7 +1336,7 @@ excl_df = data["excluded_df"]
 unmatched_df = data["unmatched_df"]
 
 with st.sidebar:
-    if st.button("Refresh Data", type="primary", use_container_width=True):
+    if st.button("Refresh Data", type="primary", width="stretch"):
         run_pipeline.clear()  # clear the cross-session cache, not just this session
         st.session_state.pop("data", None)
         st.rerun()
@@ -1414,11 +1551,22 @@ with tab_weekly:
             _orders = coded_week["Discounted Orders"].dropna().sum()
             kpis += [
                 {"label": "Attributed Revenue", "value": fmt_money(_attr), "exact": exact_money(_attr),
-                 "sub": "Net sales, discounted items"},
+                 "sub": f"{fmt_count(_orders)} orders · net of discount"},
+            ]
+            if ("New Customer Revenue" in coded_week.columns
+                    and coded_week["New Customer Revenue"].notna().any()):
+                _new_rev = coded_week["New Customer Revenue"].sum()
+                _new_orders = coded_week["New Customer Orders"].sum()
+                kpis.append({
+                    "label": "New-Customer Revenue", "value": fmt_money(_new_rev),
+                    "exact": (f"{exact_money(_new_rev)} from {exact_count(_new_orders)} first-ever "
+                              f"Shopify orders; existing customers {exact_money(_attr - _new_rev)}"),
+                    "sub": (f"{_new_rev / _attr:.0%} of attributed · {fmt_count(_new_orders)} buyers"
+                            if _attr else f"{fmt_count(_new_orders)} buyers"),
+                })
+            kpis += [
                 {"label": "Total Sales", "value": fmt_money(_sales), "exact": exact_money(_sales),
                  "sub": "Full matched orders"},
-                {"label": "Orders", "value": fmt_count(_orders), "exact": exact_count(_orders),
-                 "sub": "Used the campaign discount"},
             ]
             # Fixed benchmark: each finalized offer vs the typical offer of
             # the reference year sent on the same kind of day.
@@ -1520,7 +1668,7 @@ with tab_weekly:
                 ],
             ).properties(height=max(len(chart_data) * 30, 160))
 
-            st.altair_chart(styled_chart(bar_chart), use_container_width=True)
+            st.altair_chart(styled_chart(bar_chart), width="stretch")
             _notes = []
             if metric_choice == "Revenue per Delivered":
                 _notes.append(f"Campaigns with fewer than {MIN_DELIVERED_THRESHOLD} delivered are left out.")
@@ -1569,11 +1717,14 @@ with tab_campaigns:
             lambda c: resolve_producer(c, _wk_producer_map) or ""
         )
 
-        _c_info, _c_dl = st.columns([3, 1])
-        with _c_info:
-            section_title(
-                "Campaign Results",
-                f"{len(details_df):,} campaigns · newest first · click a column header to sort",
+        _c_view, _c_dl = st.columns([3, 1])
+        with _c_view:
+            campaigns_view = st.radio(
+                "View",
+                ["Campaign results", "Automatic-discount offers"],
+                horizontal=True,
+                key="campaigns_view",
+                label_visibility="collapsed",
             )
         with _c_dl:
             st.download_button(
@@ -1582,43 +1733,128 @@ with tab_campaigns:
                 file_name=f"campaign_details_{wk_start.isoformat()}_to_{wk_end.isoformat()}.csv",
                 mime="text/csv",
                 key="campaign_csv_download",
-                use_container_width=True,
+                width="stretch",
             )
 
-        table_cols = [
-            "Parsed Send Date", "Producer", "Campaign Name", "Discount Code",
-            "Delivered", "Clicked", "Discounted Orders", "Attributed Revenue",
-            "Total Sales", "Revenue per Delivered", "Sales per Delivered",
-        ]
-        available = [c for c in table_cols if c in details_df.columns]
-        st.dataframe(
-            details_df[available],
-            column_config={
-                "Parsed Send Date": st.column_config.DateColumn("Send Date", width="small"),
-                "Producer": st.column_config.TextColumn("Producer", width="medium"),
-                "Campaign Name": st.column_config.TextColumn("Campaign", width="large"),
-                "Discount Code": st.column_config.TextColumn("Code", width="small"),
-                "Delivered": st.column_config.NumberColumn("Delivered", format="%d"),
-                "Clicked": st.column_config.NumberColumn(
-                    "Clicks", format="%d",
-                    help="People who clicked at least one link in the email (HubSpot's 'Clicked')"),
-                "Discounted Orders": st.column_config.NumberColumn(
-                    "Orders", help="Orders that used the campaign discount"),
-                "Attributed Revenue": st.column_config.NumberColumn("Attr. Revenue", format="$%.2f"),
-                "Total Sales": st.column_config.NumberColumn("Total Sales", format="$%.2f"),
-                "Revenue per Delivered": st.column_config.NumberColumn("Rev/Delivered", format="$%.4f"),
-                "Sales per Delivered": st.column_config.NumberColumn("Sales/Delivered", format="$%.4f"),
-            },
-            height=460,
-            use_container_width=True,
-            hide_index=True,
-        )
+        if campaigns_view == "Campaign results":
+            section_title(
+                "Campaign Results",
+                f"{len(details_df):,} campaigns · newest first · click a column header to sort",
+            )
+            # Send Date + Campaign are pinned so they stay in view while the
+            # numbers scroll sideways; revenue columns come first.
+            table_cols = [
+                "Parsed Send Date", "Campaign Name",
+                "Attributed Revenue", "New Customer Revenue", "Existing Customer Revenue",
+                "Discounted Orders", "Delivered", "Clicked",
+                "Total Sales", "Revenue per Delivered", "Sales per Delivered",
+                "Producer", "Discount Code",
+            ]
+            available = [c for c in table_cols if c in details_df.columns]
+            st.dataframe(
+                details_df[available],
+                column_config={
+                    "Parsed Send Date": st.column_config.DateColumn("Send Date", width="small", pinned=True),
+                    "Producer": st.column_config.TextColumn("Producer", width="medium"),
+                    "Campaign Name": st.column_config.TextColumn("Campaign", width="large", pinned=True),
+                    "Discount Code": st.column_config.TextColumn("Code", width="small"),
+                    "Delivered": st.column_config.NumberColumn("Delivered", format="%d"),
+                    "Clicked": st.column_config.NumberColumn(
+                        "Clicks", format="%d",
+                        help="People who clicked at least one link in the email (HubSpot's 'Clicked')"),
+                    "Discounted Orders": st.column_config.NumberColumn(
+                        "Orders", help="Orders that used the campaign discount"),
+                    "Attributed Revenue": st.column_config.NumberColumn("Attr. Revenue", format="$%.2f"),
+                    "New Customer Revenue": st.column_config.NumberColumn(
+                        "New Cust. Rev", format="$%.2f",
+                        help="Attributed Revenue from first-ever Shopify orders"),
+                    "Existing Customer Revenue": st.column_config.NumberColumn(
+                        "Existing Cust. Rev", format="$%.2f",
+                        help="Attributed Revenue from customers who had ordered before. "
+                             "New + Existing = Attr. Revenue"),
+                    "Total Sales": st.column_config.NumberColumn("Total Sales", format="$%.2f"),
+                    "Revenue per Delivered": st.column_config.NumberColumn("Rev/Delivered", format="$%.4f"),
+                    "Sales per Delivered": st.column_config.NumberColumn("Sales/Delivered", format="$%.4f"),
+                },
+                height=460,
+                width="stretch",
+                hide_index=True,
+            )
+        else:
+            # ── Automatic-discount offers: what the email is credited with vs
+            #    what the discount sold to people who weren't sent the email ──
+            section_title(
+                "Automatic-Discount Offers",
+                "Offers set up as automatic discounts apply to every shopper, not only email "
+                "readers · only buyers who were sent the email are credited to it",
+            )
+            _auto = (details_df[details_df["Automatic Discount"] == True].copy()
+                     if "Automatic Discount" in details_df.columns else pd.DataFrame())
+            if _auto.empty:
+                st.info("No offers in this date range used an automatic discount.")
+            else:
+                _auto["Not-Sent Orders"] = (_auto["All-Buyer Orders"] - _auto["Discounted Orders"]).clip(lower=0)
+                _auto["Not-Sent Revenue"] = (_auto["All-Buyer Revenue"] - _auto["Attributed Revenue"]).clip(lower=0)
+                _cred = _auto["Attributed Revenue"].sum()
+                _cred_orders = _auto["Discounted Orders"].sum()
+                _ns = _auto["Not-Sent Revenue"].sum()
+                _ns_orders = _auto["Not-Sent Orders"].sum()
+                _all = _auto["All-Buyer Revenue"].sum()
+                render_kpi_row([
+                    {"label": "Automatic-Discount Offers", "value": fmt_count(len(_auto)),
+                     "sub": f"of {len(details_df):,} campaigns in range"},
+                    {"label": "Credited to Email", "value": fmt_money(_cred), "exact": exact_money(_cred),
+                     "sub": f"{fmt_count(_cred_orders)} orders from people sent the email"},
+                    {"label": "Buyers Not Sent the Email", "value": fmt_money(_ns), "exact": exact_money(_ns),
+                     "sub": f"{fmt_count(_ns_orders)} orders · context only"},
+                    {"label": "Share Credited to Email", "value": (f"{_cred / _all:.0%}" if _all else "—"),
+                     "sub": f"of {fmt_money(_all)} sold under these discounts",
+                     "exact": exact_money(_all) + " total under these discounts"},
+                ])
+                spacer("sm")
+                st.dataframe(
+                    _auto[[
+                        "Parsed Send Date", "Campaign Name", "Discount Code", "Delivered",
+                        "Discounted Orders", "Attributed Revenue",
+                        "Not-Sent Orders", "Not-Sent Revenue", "All-Buyer Revenue",
+                    ]],
+                    column_config={
+                        "Parsed Send Date": st.column_config.DateColumn("Send Date", width="small", pinned=True),
+                        "Campaign Name": st.column_config.TextColumn("Campaign", width="large", pinned=True),
+                        "Discount Code": st.column_config.TextColumn("Code", width="small"),
+                        "Delivered": st.column_config.NumberColumn("Delivered", format="%d"),
+                        "Discounted Orders": st.column_config.NumberColumn(
+                            "Credited Orders", help="Orders from people who were sent the email before ordering"),
+                        "Attributed Revenue": st.column_config.NumberColumn(
+                            "Credited Revenue", format="$%.2f",
+                            help="Attributed Revenue: what the email is credited with"),
+                        "Not-Sent Orders": st.column_config.NumberColumn(
+                            "Not-Sent Orders", help="Orders under the discount from people not sent the email"),
+                        "Not-Sent Revenue": st.column_config.NumberColumn(
+                            "Not-Sent Revenue", format="$%.2f",
+                            help="Revenue under the discount from people not sent the email. Context only, "
+                                 "not credited to the email"),
+                        "All-Buyer Revenue": st.column_config.NumberColumn(
+                            "All Buyers", format="$%.2f", help="Credited + Not-Sent"),
+                    },
+                    height=420,
+                    width="stretch",
+                    hide_index=True,
+                )
+                st.caption(
+                    "**How to read this:** an automatic discount works for anyone who reaches the wine's page "
+                    "(search, the website, word of mouth), so part of what it sells would have happened "
+                    "without the email. The dashboard credits the email only with orders from people it was "
+                    "delivered to before they ordered. **Not-Sent** is the rest: real sales under the offer, "
+                    "shown for context and never added to email revenue."
+                )
+
         st.caption(
             "**Download CSV (all columns)** is the file for other projects: the same columns in "
             "the same order as before (including Influenced, Click-Influenced and All-Buyer), "
-            "with Clicks added at the end. The small download icon on the table saves only the "
-            "columns shown here. Blank = attribution not attempted (no code, EDU/CONTENT); "
-            "0 = attempted, no orders."
+            "with Clicks, New Customer Orders, New Customer Revenue and Existing Customer Revenue "
+            "added at the end. The small download icon on a table saves only the columns shown. "
+            "Blank = attribution not attempted (no code, EDU/CONTENT); 0 = attempted, no orders."
         )
 
 
@@ -1748,7 +1984,7 @@ with tab_monthly:
             )
 
             combo = alt.layer(bars, line).resolve_scale(y="independent").properties(height=350)
-            st.altair_chart(styled_chart(combo), use_container_width=True)
+            st.altair_chart(styled_chart(combo), width="stretch")
             st.caption(
                 f"Bars = total sales (full orders) \u00b7 Line = attributed revenue (net sales, discounted items)"
             )
@@ -1777,7 +2013,7 @@ with tab_monthly:
                 ],
             ).properties(height=max(len(top3) * 50, 120))
 
-            st.altair_chart(styled_chart(top3_chart), use_container_width=True)
+            st.altair_chart(styled_chart(top3_chart), width="stretch")
 
         spacer("lg")
 
@@ -1812,7 +2048,7 @@ with tab_monthly:
                 ],
             ).properties(height=max(len(code_order) * 34, 150))
 
-            st.altair_chart(styled_chart(stacked), use_container_width=True)
+            st.altair_chart(styled_chart(stacked), width="stretch")
             rest_caption(_code_rest, "Attributed Revenue", _code_tot["Attributed Revenue"].sum(), "codes")
         else:
             st.info("No data for discount code breakdown.")
@@ -1848,7 +2084,7 @@ with tab_monthly:
                         "Avg Rev/Delivered", format="$%.4f"
                     ),
                 },
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -1916,13 +2152,16 @@ with tab_producer:
                     alt.Tooltip("Total_Discounted_Orders:Q", title="Orders", format=",.0f"),
                 ],
             ).properties(height=max(len(_prod_data) * 30, 160))
-            st.altair_chart(styled_chart(_prod_bar), use_container_width=True)
+            st.altair_chart(styled_chart(_prod_bar), width="stretch")
             rest_caption(_prod_rest, "Total_Attributed_Revenue", _prod_total, "producers")
 
         spacer("lg")
 
-        # ── E.2: Campaign Drill-Down ──────────────────────────────────────
-        section_title("Campaign Drill-Down", "Select a producer to see individual campaign results")
+        # ── E.2: Producer Drill-Down — products, then campaigns ───────────
+        section_title(
+            "Producer Drill-Down",
+            "Pick a producer to see which wines earned its attributed revenue, then its campaigns",
+        )
 
         if not _pa_overview.empty:
             _all_producers = sorted(_pa_overview["Producer"].dropna().unique().tolist())
@@ -1933,8 +2172,13 @@ with tab_producer:
                 label_visibility="collapsed",
             )
 
+            if _selected_producer != "— Select a producer —":
+                render_producer_products(_selected_producer, data, run_date)
+
             if _selected_producer != "— Select a producer —" and not _pa_campaigns.empty:
                 _drill = _pa_campaigns[_pa_campaigns["Producer"] == _selected_producer].copy()
+                spacer("md")
+                section_title("Campaigns", f"Finalized campaigns for {_selected_producer}")
                 if _drill.empty:
                     st.info(f"No finalized campaigns found for {_selected_producer}.")
                 else:
@@ -1950,7 +2194,7 @@ with tab_producer:
                             "Discount Value": st.column_config.NumberColumn("Discount Value", format="$%.2f"),
                             "Revenue per Delivered": st.column_config.NumberColumn("Rev/Delivered", format="$%.4f"),
                         },
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
 
@@ -1976,7 +2220,7 @@ with tab_producer:
                     alt.Tooltip("Producer_Count:Q", title="Producers", format=",.0f"),
                 ],
             ).properties(height=max(len(_region_chart_df) * 30, 160))
-            st.altair_chart(styled_chart(_region_bar), use_container_width=True)
+            st.altair_chart(styled_chart(_region_bar), width="stretch")
             rest_caption(_region_rest, "Total_Attributed_Revenue",
                          _pa_region["Total_Attributed_Revenue"].sum(), "sub-regions")
 
@@ -1990,7 +2234,7 @@ with tab_producer:
                     "Revenue per Delivered": st.column_config.NumberColumn("Rev/Delivered", format="$%.4f"),
                     "Producer_Count": st.column_config.NumberColumn("Producers", format="%.0f"),
                 },
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         else:
@@ -2012,7 +2256,7 @@ with tab_producer:
                     alt.Tooltip("Producer_Count:Q", title="Producers", format=",.0f"),
                 ],
             ).properties(height=max(len(_pa_tier) * 50, 150))
-            st.altair_chart(styled_chart(_tier_bar), use_container_width=True)
+            st.altair_chart(styled_chart(_tier_bar), width="stretch")
 
             st.dataframe(
                 _pa_tier,
@@ -2024,7 +2268,7 @@ with tab_producer:
                     "Revenue per Delivered": st.column_config.NumberColumn("Rev/Delivered", format="$%.4f"),
                     "Producer_Count": st.column_config.NumberColumn("Producers", format="%.0f"),
                 },
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         else:
@@ -2046,7 +2290,7 @@ with tab_producer:
                         "Attributed Revenue": st.column_config.NumberColumn("Attr. Revenue", format="$%.2f"),
                         "Delivered": st.column_config.NumberColumn("Delivered", format="%.0f"),
                     },
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
             else:
@@ -2135,7 +2379,7 @@ with tab_section:
             column_config={
                 "Revenue": st.column_config.NumberColumn(format="$%.2f"),
             },
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -2151,7 +2395,7 @@ with tab_section:
                 x=alt.X("Clicks:Q"),
                 tooltip=["code:N", "Clicks:Q"],
             ).properties(height=max(len(_by_code) * 30, 160))
-            st.altair_chart(styled_chart(_chart), use_container_width=True)
+            st.altair_chart(styled_chart(_chart), width="stretch")
             rest_caption(_sc_rest, "Clicks", _sc_total, "codes", unit="clicks")
         else:
             st.info("No section clicks recorded yet.")
@@ -2193,7 +2437,7 @@ with tab_section:
                     "total_price": st.column_config.NumberColumn("Order Total", format="$%.2f"),
                     "Evidence": st.column_config.TextColumn("Journey evidence", width="large"),
                 },
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         else:
@@ -2233,7 +2477,7 @@ with tab_qa:
         if not excl_df.empty:
             st.dataframe(
                 excl_df,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         else:
@@ -2259,7 +2503,7 @@ with tab_qa:
                     "Total Discount Amount": st.column_config.NumberColumn(format="$%.2f"),
                     "Total Order Value": st.column_config.NumberColumn(format="$%.2f"),
                 },
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         else:
@@ -2408,6 +2652,9 @@ slim-down; and incrementality would require a holdout test.
 - Campaigns with fewer than **50 deliveries** are excluded from efficiency rankings.
 - **Offers beating benchmark** (Weekly tab) compares each finalized offer's revenue per 1,000 emails delivered with a **fixed benchmark**: the typical (median) offer from **Jun 2025 – May 2026**, worked out separately for Fri/Sat sends and weekday sends because they earn very different amounts per email. Events and sends under 50 delivered are left out. Because the benchmark is the middle offer of that year, about half of offers beat it in a typical period. The benchmark does not change with the date picker; it is reset once a year.
 - **Clicks** is HubSpot's "Clicked": people who clicked at least one link. HubSpot's click rate is Clicks ÷ Delivered.
+- **New vs existing customers** splits Attributed Revenue. An order is from a **new customer** when it is the buyer's first-ever Shopify order (checked by Shopify customer and email address against every order since the store opened in March 2020, ignoring cancelled and test orders). Everything else is **existing**, so New + Existing = Attributed Revenue. People who bought only by phone, wholesale or on an older site count as new on their first Shopify order.
+- **Automatic-discount offers** (Campaigns tab) shows, for offers set up as automatic discounts, what the email is credited with next to what the same discount sold to people who were **not sent** the email. The not-sent part is context only and is never added to email revenue.
+- **Products** (Producers tab) lists the wines that carried each producer's campaign discount, valued the same way as Attributed Revenue, so they add up to it. **Featured in email** compares the wine's vintage with the vintage(s) in the campaign name.
 - The sidebar **event-campaign filter** hides BIN Sale, Large Format and Holiday campaigns: any campaign whose code is a discount family (BIN Sale, GoBig, BigDaddy, July4th, LaborDay25…), whose name contains BIN Sale / holiday sale / flash sale / clearance, or whose code has Offer Type `holiday` or `format promotion` in the mapping sheet. Producer offers using the producer's own code are kept even if themed (e.g. a large-format Las Cases offer). This filter changes what is shown only — never how revenue is attributed.
 - The **Producers tab** only includes finalized campaigns, resolves each discount code to a producer via the mapping spreadsheet, and excludes non-producer buckets (BIN Sale, Holiday, etc.) from producer rankings.
 - History rows for finalized campaigns are **frozen** — later pipeline runs never overwrite them.

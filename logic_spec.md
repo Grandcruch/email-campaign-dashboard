@@ -80,6 +80,24 @@ Discounted Orders / Attributed Revenue.
 | **All-Buyer Orders** | Discounted Orders before §5.7. | `null` if Code = None, EDU, CONTENT, or the recipient rule did not run |
 | **All-Buyer Revenue** | Attributed Revenue before §5.7. | same as above |
 
+**Automatic Discount** (flag, added 2026-11-20): `true` when any matched order, before §5.7, used an automatic discount rather than a typed code. It drives the Campaigns tab's "Automatic-discount offers" view, which shows Credited (= Attributed Revenue / Discounted Orders) against **Not-Sent** (= All-Buyer minus credited: buyers under the discount who were not sent the email; context only).
+
+### 1.7 New vs Existing Customers (added 2026-11-20)
+
+A split of **Attributed Revenue** by whether the order was the buyer's first-ever Shopify order. Implemented in `src/customer_history.py`; runs after §5.7, so only credited orders are split.
+
+| Metric | Definition | Null Condition |
+|---|---|---|
+| **New Customer Orders** | Credited orders that are the buyer's first-ever Shopify order: no earlier order (not cancelled, not a test order) exists for the same Shopify customer id or the same email address. | `null` if Code = None, EDU, CONTENT, or the order history could not be fetched |
+| **New Customer Revenue** | Attributed Revenue of those orders. | same as above |
+| **Existing Customer Revenue** | `Attributed Revenue − New Customer Revenue` (rounded values), so the two always add up exactly. Includes orders with no customer id and no email (they can't be shown to be first orders). | same as above |
+
+- **Order history** = every order since `DATA_START_DATE` (the bulk list) plus every order before it, back to the store's first order (2020-03-23). The pre-floor part is fetched once by GraphQL (~25 s for ~10.4K orders) and cached in `output/pre_floor_customers.json` as **hashed** keys only (no raw emails), reused until `DATA_START_DATE` changes.
+- People who bought only outside Shopify (phone, wholesale, an older site) count as new on their first Shopify order (user decision 2026-11-20).
+- A second order by a brand-new customer inside the same campaign counts as existing (only the first-ever order is new). So New Customer Orders = number of new customers.
+- `0` (not null) when attribution ran and found no orders.
+- History rows (`campaign_history.csv`) do not carry these columns; the dashboard shows them from the live run.
+
 ---
 
 ## 2. Line-Item Attribution Logic
@@ -432,9 +450,19 @@ Replaces the Delivery vs Revenue scatter, whose median lines were recomputed fro
 The Campaigns tab's **Download CSV (all columns)** file is loaded by other projects, so its format is fixed:
 
 - Columns, in this order (the original dataframe column names, as the old table download wrote them): `Parsed Send Date, Producer, Discount Code, Campaign Name, Discounted Orders, Delivered, Attributed Revenue, Total Sales, Revenue per Delivered, Sales per Delivered, Influenced Orders, Influenced Offer Revenue, Influenced Total Sales, Click-Influenced Orders, Click-Influenced Offer Revenue, All-Buyer Orders, All-Buyer Revenue`.
-- New columns are only ever **appended at the end**. Appended so far: `Clicks` (2026-11-20).
+- New columns are only ever **appended at the end**. Appended so far: `Clicks` (2026-11-20, Phase 1), then `New Customer Orders`, `New Customer Revenue`, `Existing Customer Revenue` (2026-11-20, Phase 2; §1.7).
 - Values: dates `YYYY-MM-DD`; numbers unformatted (whole numbers without `.0`, others full precision, no exponent); null = empty cell, so the null-vs-zero rule (§1.3) is preserved; UTF-8 with BOM; comma delimiter; `\n` line ends.
 - Rows: every campaign in the sidebar date range after the Finalized and event filters, newest first.
+
+### 6.6 Producer Products (added 2026-11-20)
+
+The Producers tab drill-down shows, for one producer, which wines earned its attributed revenue (`src/products.py`).
+
+- **Source:** the attributed line items of every credited order (after §5.7): only lines the campaign discount applied to, valued `price × quantity − campaign discount allocation`, the same as Attributed Revenue (§2.2). A producer's product rows therefore add up to its attributed revenue. Exception: the rare fallback order with no matching discount application lists every line net of its own discounts.
+- **Producer** of a line = `resolve_producer(campaign code)`, the same mapping as the rest of the tab. Only finalized campaigns (`attribution_window_end <= run date`).
+- **Vintage / Size** from the SKU (`BDX:MAR:MARG-0750-2017-F0L0C0` → 750ml, 2017; `PK03` → Case of 3), falling back to the title (`2017 Chateau Margaux, Margaux, Bottle (750ml)`).
+- **Featured in email:** Yes = the wine's vintage appears in the campaign name's Producer/Topic (years found by `(19|20)\d{2}`); No = the campaign named other vintages; — = no vintage named, or NV / no vintage on the product.
+- Product = one Shopify product title (vintage + wine + format), grouped across campaigns: Units (quantity), Orders (distinct), Attributed Revenue, Campaigns (distinct code + send date).
 
 ---
 
