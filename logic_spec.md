@@ -422,6 +422,12 @@ Orders with a TYPED code are never gated.
 
 **Excludes:** Codeless campaigns (EDU/CONTENT)
 
+**Dashboard Monthly tab (changed 2026-11-20):** the dashboard no longer uses calendar months. A month = the whole **Monday–Sunday weeks whose Thursday falls in that month** (4 or 5 weeks; e.g. November 2026 = Nov 2–29, Nov 1 counts in October and Nov 30 in December). Every number on the tab (KPI cards, week table, charts, Discount Code Summary via `generate_period_report`) covers exactly those weeks, so the month total = the sum of its weeks. The CLI / CSV `monthly_discount_report.csv` still uses the calendar month (`generate_monthly_report`, unchanged).
+
+- **Same week last year** = the week 364 days earlier (same weekdays; Thanksgiving week lines up with Thanksgiving week). No last-year value before `DATA_START_DATE` (shown blank, not $0).
+- **Week table:** Week, Offers (campaigns with a code and attribution, finalized), Revenue (Attributed), Same Week Last Year, LY Offers, LY Revenue, Change. Weeks are marked "(still open)" until 7 days after their Sunday, "(upcoming)" if they haven't started.
+- **Vs last year on the KPI cards** compares **finished weeks only**, so a month in progress isn't measured against last year's complete month.
+
 ### 6.3 Producer Performance Report
 
 **Columns:** Producer/Topic, Campaign Count, Total Attributed Revenue, Total Discounted Orders, Total Delivered, Revenue per Delivered, Avg Revenue per Campaign, Best Campaign, Worst Campaign
@@ -463,6 +469,26 @@ The Producers tab drill-down shows, for one producer, which wines earned its att
 - **Vintage / Size** from the SKU (`BDX:MAR:MARG-0750-2017-F0L0C0` → 750ml, 2017; `PK03` → Case of 3), falling back to the title (`2017 Chateau Margaux, Margaux, Bottle (750ml)`).
 - **Featured in email:** Yes = the wine's vintage appears in the campaign name's Producer/Topic (years found by `(19|20)\d{2}`); No = the campaign named other vintages; — = no vintage named, or NV / no vintage on the product.
 - Product = one Shopify product title (vintage + wine + format), grouped across campaigns: Units (quantity), Orders (distinct), Attributed Revenue, Campaigns (distinct code + send date).
+
+### 6.7 Key Insights cards (Weekly tab, added 2026-11-20)
+
+Four short cards for leadership, computed for the sidebar date range (plain language, no statistics jargon). Revenue = Attributed Revenue.
+
+1. **Revenue vs last year:** this period vs the same dates 364 days earlier and vs the previous period of equal length (both finalized only). Headline uses last year when available, else the previous period. A comparison period starting before `DATA_START_DATE` is not shown.
+2. **Best offer and $0 offers:** among §6.4 offers (finalized, non-event, ≥ 50 delivered): the highest Attributed Revenue with its rate per 1,000 delivered and multiple of its day-type benchmark; count of offers with $0 and up to three names; top-5 chart.
+3. **Offer A vs B:** §6.8 metrics for the range (A vs B per 1,000 delivered, B revenue per week, B $0 share vs suggested targets).
+4. **New customers:** New Customer Revenue share of Attributed Revenue (§1.7), number of new customers, the offer with the most new buyers, top-5 offers by new-customer revenue.
+
+### 6.8 Offer A vs Offer B (added 2026-11-20)
+
+`src/offer_slots.py`; "Offer A vs B" tab and insight card 3. Uses the sidebar date range and Finalized toggle.
+
+- **Offers:** campaigns with a discount code and attribution, excluding events (`event_mask`). Grouped by send date: a day with one offer → **Single**; a day with two or more → one **A** (main) and the rest **B** (second).
+- **Which is A:** the Offer Log (sheet "Offer Log" in "Offer Evaluation Standard - Agent4.xlsx": D = send date, E = offer, I = Rank; "A" = main). A log row matches a campaign by date (same day preferred, ±1 day) and producer-word overlap ≥ 0.5 (vintages, numbers and generic words like Chateau/Domaine ignored). If a two-offer day has exactly one matched "A", source = **Offer Log**; otherwise the bigger send (Delivered) is A and source = **Estimated**. HubSpot names win where the log disagrees.
+- **Reading the log:** live app = `OFFER_LOG_URL` Streamlit secret (view-only "anyone with the link" OneDrive/SharePoint link; `download=1` is appended); local runs = `OFFER_LOG_PATH` or the OneDrive file. Cached 6 h; cleared by Refresh Data. Not connected → every two-offer day is Estimated and the page says so. The log starts 2026-04-09, so earlier two-offer days are always Estimated.
+- **Metrics per group:** offers, Attributed Revenue, average per offer, revenue per 1,000 delivered (`sum revenue / sum delivered × 1,000`), share of offers with $0, average audience. Headline comparison = per 1,000 delivered (B goes to smaller segments, so totals aren't comparable).
+- **B revenue per week** = B revenue ÷ number of Monday–Sunday weeks that had a two-offer day.
+- **Suggested targets** (from the 2026-11-12 cadence review, not yet team-approved): B ≥ $5,000 a week (`B_WEEKLY_TARGET`), B offers with $0 ≤ 25% (`B_ZERO_TARGET`).
 
 ---
 

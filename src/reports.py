@@ -782,7 +782,24 @@ def generate_monthly_report(df: pd.DataFrame, year: int, month: int) -> pd.DataF
     monthly["_month"] = pd.to_datetime(monthly["Parsed Send Date"]).dt.month
     monthly["_year"] = pd.to_datetime(monthly["Parsed Send Date"]).dt.year
     monthly = monthly[(monthly["_year"] == year) & (monthly["_month"] == month)]
+    return _summarize_by_code(monthly)
 
+
+def generate_period_report(df: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
+    """Same summary as generate_monthly_report for any send-date range
+    [start, end] (inclusive). The dashboard's Monthly tab uses whole
+    Monday-Sunday weeks, which can start or end in a neighbouring month."""
+    period = df[
+        (df["Parsed Send Date"].notna()) &
+        (df["is_final_snapshot"] == True) &
+        (df["Discount Code"] != "None") &
+        (df["Attributed Revenue"].notna())
+    ].copy()
+    send = pd.to_datetime(period["Parsed Send Date"]).dt.date
+    return _summarize_by_code(period[(send >= start) & (send <= end)])
+
+
+def _summarize_by_code(monthly: pd.DataFrame) -> pd.DataFrame:
     if monthly.empty:
         return pd.DataFrame()
 

@@ -17,6 +17,7 @@ import html
 import json
 from datetime import date, datetime, timedelta
 
+import requests
 import streamlit as st
 import pandas as pd
 import altair as alt
@@ -24,7 +25,7 @@ import altair as alt
 # Pipeline code version — bump on every deploy-relevant change. Displayed in
 # the sidebar so a stale-module deploy (Streamlit Cloud soft-reload keeping
 # old src/ modules) is immediately visible instead of masquerading as bad data.
-PIPELINE_VERSION = "2026-11-20.2"
+PIPELINE_VERSION = "2026-11-20.3"
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +57,7 @@ from src.click_attribution import apply_click_attribution
 from src.recipient_gate import apply_recipient_gate
 from src.customer_history import apply_new_customer_split
 from src.products import attribution_lines_frame
+from src.offer_slots import parse_offer_log, assign_offer_slots
 from src.families import load_family_mapping, is_family_key, get_family_identifiers, event_codes
 from src.reports import (
     assemble_dashboard_rows,
@@ -66,6 +68,7 @@ from src.reports import (
     generate_weekly_report,
     generate_weekly_insights,
     generate_monthly_report,
+    generate_period_report,
     generate_producer_report,
     generate_producer_analytics,
     generate_excluded_campaigns,
@@ -595,6 +598,267 @@ def render_producer_products(producer: str, data: dict, run_date: date):
         "appears in the campaign name (Yes), a campaign named other vintages (No), or no vintage was "
         "named (—). Codes work across the producer, so buyers often pick a different vintage."
     )
+
+
+# ─── Offer Log (A/B labels) ─────────────────────────────────────────────────
+# The live app reads the log through a view-only OneDrive share link stored
+# as the OFFER_LOG_URL secret; local runs read the OneDrive file directly.
+OFFER_LOG_LOCAL = os.path.join(
+    os.path.expanduser("~"), "OneDrive - Grand Cru Liquid Assets LLC", "Desktop",
+    "Everett's email offers recommendation system", "Offer Evaluation Standard - Agent4.xlsx",
+)
+B_WEEKLY_TARGET = 5000      # suggested in the 2026-11-12 cadence review
+B_ZERO_TARGET = 0.25        # suggested: at most 25% of B offers with $0
+
+
+def _setting(name: str) -> str:
+    """A setting from Streamlit secrets, the environment, or .env.txt."""
+    try:
+        v = st.secrets.get(name)
+        if v:
+            return str(v).strip()
+    except Exception:
+        pass
+    if os.environ.get(name):
+        return os.environ[name].strip()
+    env_path = os.path.join(PROJECT_ROOT, ".env.txt")
+    if os.path.isfile(env_path):
+        with open(env_path) as f:
+            for line in f:
+                if line.strip().startswith(f"{name}="):
+                    return line.split("=", 1)[1].strip()
+    return ""
+
+
+def _direct_download(url: str) -> str:
+    """OneDrive/SharePoint share link -> direct file download."""
+    if "download=1" in url:
+        return url
+    return url + ("&" if "?" in url else "?") + "download=1"
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def load_offer_log(today: date) -> tuple[pd.DataFrame, str, bool]:
+    """(log rows, note for the page, connected?)."""
+    empty = pd.DataFrame(columns=["log_send_date", "log_offer", "log_rank"])
+    url = _setting("OFFER_LOG_URL")
+    try:
+        if url:
+            resp = requests.get(_direct_download(url), timeout=30)
+            resp.raise_for_status()
+            if not resp.content.startswith(b"PK"):
+                return empty, ("The Offer Log link did not return the workbook (it may need "
+                               "“Anyone with the link can view”). A/B is estimated from "
+                               "audience size until it does."), False
+            return parse_offer_log(resp.content, today), "A/B labels from the Offer Log.", True
+        path = _setting("OFFER_LOG_PATH") or OFFER_LOG_LOCAL
+        if os.path.isfile(path):
+            with open(path, "rb") as f:
+                return parse_offer_log(f.read(), today), "A/B labels from the Offer Log (local file).", True
+        return empty, ("The Offer Log isn't connected yet, so A/B is estimated from audience size "
+                       "(the bigger send that day = A)."), False
+    except Exception as exc:
+        return empty, (f"The Offer Log could not be read ({type(exc).__name__}); A/B is estimated "
+                       "from audience size."), False
+
+
+def slot_summary(offers: pd.DataFrame) -> dict:
+    """Totals for one group of offers (A, B or Single)."""
+    n = len(offers)
+    rev = offers["Attributed Revenue"].sum() if n else 0.0
+    deliv = offers["Delivered"].sum() if n else 0
+    return {
+        "offers": n,
+        "revenue": rev,
+        "avg": rev / n if n else None,
+        "per_1000": rev / deliv * 1000 if deliv else None,
+        "zero_share": float((offers["Attributed Revenue"] == 0).mean()) if n else None,
+        "audience": offers["Delivered"].mean() if n else None,
+    }
+
+
+def _week_monday(d) -> date:
+    d = pd.Timestamp(d).date()
+    return d - timedelta(days=d.weekday())
+
+
+def month_weeks(year: int, month: int) -> list[date]:
+    """Mondays of the Mon-Sun weeks that belong to a month: a week belongs to
+    the month holding most of its days (its Thursday), so every month has 4
+    or 5 whole weeks and no week is split."""
+    first = date(year, month, 1)
+    mon = first - timedelta(days=first.weekday())
+    weeks = []
+    while mon <= first + timedelta(days=37):
+        thu = mon + timedelta(days=3)
+        if thu.year == year and thu.month == month:
+            weeks.append(mon)
+        mon += timedelta(days=7)
+    return weeks
+
+
+def week_label(mon: date, with_year: bool = False) -> str:
+    sun = mon + timedelta(days=6)
+    left = f"{mon.strftime('%b')} {mon.day}"
+    right = f"{sun.day}" if sun.month == mon.month else f"{sun.strftime('%b')} {sun.day}"
+    return f"{left} – {right}" + (f", {sun.year}" if with_year else "")
+
+
+def coded_offers(frame: pd.DataFrame) -> pd.DataFrame:
+    """Campaigns with a code and attribution (events included)."""
+    if frame.empty:
+        return frame
+    return frame[(frame["Discount Code"] != "None") & frame["Attributed Revenue"].notna()]
+
+
+def _in_range(frame: pd.DataFrame, start: date, end: date, finalized: bool = True) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    send = pd.to_datetime(frame["Parsed Send Date"]).dt.date
+    out = frame[frame["Parsed Send Date"].notna() & (send >= start) & (send <= end)]
+    if finalized:
+        out = out[out["is_final_snapshot"] == True]
+    return out
+
+
+def _mini_bars(df: pd.DataFrame, label: str, value: str, fmt: str, color_col: str | None = None,
+               height: int | None = None) -> alt.Chart:
+    """Small horizontal bar chart for the insight cards."""
+    enc = dict(
+        y=alt.Y(f"{label}:N", sort=None, title=None, axis=alt.Axis(labelLimit=220, labelOverlap=False)),
+        x=alt.X(f"{value}:Q", title=None, axis=alt.Axis(format=fmt, tickCount=3)),
+        tooltip=[alt.Tooltip(f"{label}:N"), alt.Tooltip(f"{value}:Q", format=fmt)],
+    )
+    chart = alt.Chart(df).mark_bar(cornerRadiusEnd=3, color=CLR_WEEKLY)
+    if color_col:
+        enc["color"] = alt.Color(f"{color_col}:N", legend=None,
+                                 scale=alt.Scale(range=[CLR_PRODUCER, CLR_TEAL, CLR_TEXT_MUTED]))
+    return chart.encode(**enc).properties(height=height or max(len(df) * 30, 84))
+
+
+def render_key_insights(range_df: pd.DataFrame, wk_start: date, wk_end: date,
+                        finalized_only: bool, pool: pd.DataFrame, offer_type_map: dict,
+                        benchmarks: dict, slots: pd.DataFrame):
+    """Four short cards for leadership: revenue vs last year, best offer and
+    $0 offers, Offer A vs B, new customers. Each = one-line headline + a few
+    numbers + a small chart. Plain language, no statistics jargon."""
+    n_days = (wk_end - wk_start).days + 1
+    coded = coded_offers(range_df)
+    c1, c2 = st.columns(2)
+    c3, c4 = st.columns(2)
+
+    # 1 ── Revenue vs last year (and vs the previous period) ───────────────
+    with c1, st.container(border=True):
+        ty_rev = coded["Attributed Revenue"].sum()
+        ly_start, ly_end = wk_start - timedelta(days=364), wk_end - timedelta(days=364)
+        pr_start, pr_end = wk_start - timedelta(days=n_days), wk_start - timedelta(days=1)
+        ly = coded_offers(_in_range(pool, ly_start, ly_end))
+        pr = coded_offers(_in_range(pool, pr_start, pr_end))
+        # A comparison period is only usable when it lies inside the data
+        ly_ok = ly_start >= DATA_START_DATE
+        pr_ok = pr_start >= DATA_START_DATE
+        if ly_ok and ly["Attributed Revenue"].sum() > 0:
+            ch = ty_rev / ly["Attributed Revenue"].sum() - 1
+            head = f"Email revenue is {'up' if ch >= 0 else 'down'} {abs(ch):.0%} on the same {n_days} days last year"
+        elif pr_ok and pr["Attributed Revenue"].sum() > 0:
+            ch = ty_rev / pr["Attributed Revenue"].sum() - 1
+            head = f"Email revenue is {'up' if ch >= 0 else 'down'} {abs(ch):.0%} on the previous {n_days} days"
+        else:
+            head = f"Email revenue: {fmt_money(ty_rev)} in this period"
+        st.markdown(f"#### {head}")
+        rows = [("This period", ty_rev, len(coded))]
+        if pr_ok:
+            rows.append((f"Previous {n_days} days", pr["Attributed Revenue"].sum(), len(pr)))
+        if ly_ok:
+            rows.append(("Same period last year", ly["Attributed Revenue"].sum(), len(ly)))
+        st.markdown(" · ".join(f"**{lbl}** {fmt_money(v)} ({n} offers)" for lbl, v, n in rows))
+        if len(rows) > 1:
+            st.altair_chart(_mini_bars(pd.DataFrame([{"Period": r[0], "Revenue": r[1]} for r in rows]),
+                                       "Period", "Revenue", "$,.0f"), width="stretch")
+        notes = []
+        if not ly_ok or not pr_ok:
+            notes.append("Comparisons need data from before this period; the data starts May 1, 2025.")
+        if not finalized_only:
+            notes.append("This period includes offers still collecting orders.")
+        if notes:
+            st.caption(" ".join(notes))
+
+    # 2 ── Best offer and offers that made $0 ──────────────────────────────
+    with c2, st.container(border=True):
+        o = offer_rates(range_df, offer_type_map)
+        if o.empty:
+            st.markdown("#### No finalized offers in this range yet")
+        else:
+            best = o.loc[o["Attributed Revenue"].idxmax()]
+            zero = o[o["Attributed Revenue"] == 0]
+            bench = benchmarks.get(best["day_type"])
+            _dt = "weekday" if best["day_type"] == "Weekday" else "Fri/Sat"
+            mult = (f", {best['rate_per_1000'] / bench:.1f}× the {_dt} benchmark" if bench else "")
+            st.markdown(f"#### {best['Producer / Topic']} was the best offer: {fmt_money(best['Attributed Revenue'])}")
+            st.markdown(
+                f"**{int(best['Discounted Orders'] or 0)} orders**, ${best['rate_per_1000']:,.0f} per 1,000 "
+                f"emails delivered{mult}. **{len(zero)} of {len(o)} offers** made no sales"
+                + (": " + ", ".join(zero.sort_values("Delivered", ascending=False)["Producer / Topic"].head(3))
+                   + ("…" if len(zero) > 3 else "") if len(zero) else "") + "."
+            )
+            top5 = o.nlargest(5, "Attributed Revenue")[["Producer / Topic", "Attributed Revenue"]]
+            st.altair_chart(_mini_bars(top5.rename(columns={"Producer / Topic": "Offer"}),
+                                       "Offer", "Attributed Revenue", "$,.0f"), width="stretch")
+            st.caption("Top 5 offers by attributed revenue. Events are left out.")
+
+    # 3 ── Offer A vs Offer B ───────────────────────────────────────────────
+    with c3, st.container(border=True):
+        ab = range_df.join(slots, how="inner") if not slots.empty else pd.DataFrame()
+        a = ab[ab["Offer Slot"] == "A"] if not ab.empty else ab
+        b = ab[ab["Offer Slot"] == "B"] if not ab.empty else ab
+        if a.empty or b.empty:
+            st.markdown("#### No two-offer days in this range")
+            st.caption("Offer A vs B compares the main and second offer on days with two offers.")
+        else:
+            sa, sb = slot_summary(a), slot_summary(b)
+            weeks = b["Parsed Send Date"].apply(_week_monday).nunique()
+            b_week = sb["revenue"] / weeks if weeks else 0
+            if sa["per_1000"] and sb["per_1000"] is not None:
+                diff = sb["per_1000"] / sa["per_1000"] - 1
+                head = (f"Second offers earned {abs(diff):.0%} {'less' if diff < 0 else 'more'} per email "
+                        f"than main offers")
+            else:
+                head = "Offer A vs Offer B"
+            st.markdown(f"#### {head}")
+            st.markdown(
+                f"**A** ${sa['per_1000'] or 0:,.0f} vs **B** ${sb['per_1000'] or 0:,.0f} per 1,000 delivered. "
+                f"B brought **{fmt_money(b_week)} a week** (suggested target {fmt_money(B_WEEKLY_TARGET)}); "
+                f"**{sb['zero_share']:.0%} of B offers** made $0 (target ≤ {B_ZERO_TARGET:.0%})."
+            )
+            st.altair_chart(_mini_bars(pd.DataFrame([
+                {"Offer": "A (main)", "Per 1,000 delivered": sa["per_1000"] or 0},
+                {"Offer": "B (second)", "Per 1,000 delivered": sb["per_1000"] or 0},
+            ]), "Offer", "Per 1,000 delivered", "$,.0f"), width="stretch")
+            st.caption("Details in the Offer A vs B tab.")
+
+    # 4 ── New customers ─────────────────────────────────────────────────────
+    with c4, st.container(border=True):
+        if "New Customer Revenue" not in coded.columns or coded["New Customer Revenue"].notna().sum() == 0:
+            st.markdown("#### New-customer revenue appears after the next data refresh")
+        else:
+            nr = coded["New Customer Revenue"].sum()
+            nn = int(coded["New Customer Orders"].sum())
+            share = nr / ty_rev if ty_rev else 0
+            st.markdown(f"#### First-time buyers brought {share:.0%} of email revenue")
+            with_new = coded[coded["New Customer Orders"] > 0]
+            top = with_new.nlargest(5, "New Customer Revenue")
+            lead = ""
+            if not with_new.empty:
+                most = with_new.loc[with_new["New Customer Orders"].idxmax()]
+                k = int(most["New Customer Orders"])
+                lead = (f" The most new buyers came from **{most['Producer / Topic']}** "
+                        f"({k} new buyer{'s' if k != 1 else ''}).")
+            st.markdown(f"**{fmt_money(nr)}** from **{nn} new customers** (first-ever Shopify order).{lead}")
+            if not top.empty:
+                st.altair_chart(_mini_bars(top[["Producer / Topic", "New Customer Revenue"]]
+                                           .rename(columns={"Producer / Topic": "Offer"}),
+                                           "Offer", "New Customer Revenue", "$,.0f"), width="stretch")
+                st.caption("Offers that brought the most new-customer revenue.")
 
 
 def section_title(title: str, subtitle: str = ""):
@@ -1338,6 +1602,7 @@ unmatched_df = data["unmatched_df"]
 with st.sidebar:
     if st.button("Refresh Data", type="primary", width="stretch"):
         run_pipeline.clear()  # clear the cross-session cache, not just this session
+        load_offer_log.clear()
         st.session_state.pop("data", None)
         st.rerun()
 
@@ -1369,7 +1634,7 @@ with st.sidebar:
     # ── Date Range (shared by the Weekly and Campaigns tabs) ────────────
     st.markdown(f"""
     <div style="margin-top: 1.25rem; font-size: 0.7rem; color: {CLR_TEXT_MUTED}; text-transform: uppercase; letter-spacing: 0.05em;">
-        Date Range &middot; Weekly &amp; Campaigns tabs
+        Date Range &middot; Weekly, Campaigns &amp; A vs B tabs
     </div>
     """, unsafe_allow_html=True)
     _all_send_dates = pd.to_datetime(full_df["Parsed Send Date"].dropna()).dt.date
@@ -1479,12 +1744,18 @@ if isinstance(date_range, tuple) and len(date_range) == 2:
 
 _benchmarks = compute_benchmarks(full_df, _offer_type_map)
 
+# Offer A / B slots for every offer (logic_spec 6.8)
+_offer_log, _offer_log_note, _offer_log_ok = load_offer_log(run_date)
+_slots = assign_offer_slots(full_df, _offer_log, _offer_type_map)
+
 # ─── Tabs ────────────────────────────────────────────────────────────────────
 
-tab_weekly, tab_campaigns, tab_monthly, tab_producer, tab_section, tab_qa, tab_method = st.tabs([
+(tab_weekly, tab_campaigns, tab_monthly, tab_ab, tab_producer, tab_section,
+ tab_qa, tab_method) = st.tabs([
     "Weekly",
     "Campaigns",
     "Monthly",
+    "Offer A vs B",
     "Producers",
     "Offer Section",
     "QA",
@@ -1612,6 +1883,13 @@ with tab_weekly:
         else:
             kpis += [_delivered_card, _clicks_card]
         render_kpi_row(kpis)
+
+        spacer("lg")
+
+        # ── Key insights for leadership: four short cards ────────────────
+        section_title("Key Insights", "Short findings with the numbers behind them, ready for slides")
+        render_key_insights(completed_week_df, wk_start, wk_end, finalized_only,
+                            display_df, _offer_type_map, _benchmarks, _slots)
 
         spacer("lg")
 
@@ -1890,40 +2168,56 @@ with tab_monthly:
         key="monthly_month_picker",
     )
 
-    # ── Scope / Context ──────────────────────────────────────────────────
+    # ── Weeks of the month ───────────────────────────────────────────────
+    # Whole Monday-Sunday weeks; a week belongs to the month that holds most
+    # of its days (its Thursday). Month totals are the sum of these weeks.
+    _weeks = month_weeks(sel_year, sel_month)
+    _p_start, _p_end = _weeks[0], _weeks[-1] + timedelta(days=6)
     st.markdown(
         f'<div class="context-line">{_fmt_month((sel_year, sel_month))} &middot; '
+        f'{len(_weeks)} weeks, {week_label(_weeks[0])} to {week_label(_weeks[-1])} &middot; '
         f'Finalized campaigns with closed attribution windows</div>',
         unsafe_allow_html=True,
     )
 
-    # Recompute monthly report for the selected month (not run month).
-    monthly_df = generate_monthly_report(display_df, sel_year, sel_month)
+    monthly_df = generate_period_report(display_df, _p_start, _p_end)
+    _fin_coded = coded_offers(display_df[display_df["is_final_snapshot"] == True])
+    all_month = _in_range(_fin_coded, _p_start, _p_end).copy()
 
-    # Get all finalized campaigns in the selected month for weekly breakdown
-    all_month = display_df[
-        (display_df["Parsed Send Date"].notna()) &
-        (display_df["is_final_snapshot"] == True) &
-        (display_df["Discount Code"] != "None") &
-        (display_df["Attributed Revenue"].notna())
-    ].copy()
-    if not all_month.empty:
-        all_month["_send_dt"] = pd.to_datetime(all_month["Parsed Send Date"])
-        all_month = all_month[
-            (all_month["_send_dt"].dt.year == sel_year) &
-            (all_month["_send_dt"].dt.month == sel_month)
-        ]
+    # Same week last year = 52 weeks (364 days) earlier: weekdays and
+    # holidays line up (Thanksgiving week vs Thanksgiving week).
+    _wk_rows = []
+    for _mon in _weeks:
+        _sun = _mon + timedelta(days=6)
+        _ty = _in_range(_fin_coded, _mon, _sun)
+        _ly_mon = _mon - timedelta(days=364)
+        _ly_ok = _ly_mon >= DATA_START_DATE
+        _ly = _in_range(_fin_coded, _ly_mon, _ly_mon + timedelta(days=6)) if _ly_ok else None
+        _ty_rev = _ty["Attributed Revenue"].sum()
+        _ly_rev = _ly["Attributed Revenue"].sum() if _ly_ok else None
+        # A week is finished once its last send's 7-day window has closed
+        _future = _mon > run_date
+        _done = _sun + timedelta(days=7) <= run_date
+        _wk_rows.append({
+            "Week": week_label(_mon) + (" (upcoming)" if _future else "" if _done else " (still open)"),
+            "_mon": _mon,
+            "_done": _done,
+            "Offers": len(_ty),
+            "Revenue": _ty_rev,
+            "Same Week Last Year": week_label(_ly_mon, with_year=True),
+            "LY Offers": len(_ly) if _ly_ok else None,
+            "LY Revenue": _ly_rev,
+            "Change": (_ty_rev / _ly_rev - 1) if (_ly_ok and _ly_rev) else None,
+        })
+    _wk_df = pd.DataFrame(_wk_rows)
+    _ly_any = _wk_df["LY Revenue"].notna().any()
 
-    _month_is_empty = monthly_df.empty and all_month.empty
-
-    # Always render the KPI row — zero values for empty months so the
-    # layout does not disappear when comparing across months.
-    if _month_is_empty:
+    if all_month.empty:
         render_kpi_row([
             {"label": "Attributed Revenue", "value": "$0", "sub": "Net sales, discounted items"},
             {"label": "Total Sales", "value": "$0", "sub": "Full matched orders"},
             {"label": "Total Orders", "value": "0"},
-            {"label": "Discount Codes", "value": "0"},
+            {"label": "Offers Sent", "value": "0"},
         ])
         spacer("md")
         st.info(
@@ -1932,64 +2226,88 @@ with tab_monthly:
             "Pick a different month above to compare."
         )
     else:
-        # ── KPI Row ──────────────────────────────────────────────────────
+        # ── KPI Row (this month's weeks, vs the same weeks last year) ─────
         total_rev = monthly_df["Total_Attributed_Revenue"].sum() if not monthly_df.empty else 0
         total_sales = monthly_df["Total_Sales"].sum() if (not monthly_df.empty and "Total_Sales" in monthly_df.columns) else 0
         total_orders = monthly_df["Total_Discounted_Orders"].sum() if not monthly_df.empty else 0
+        # Compare with last year only over FINISHED weeks, so a month in
+        # progress isn't measured against last year's complete month.
+        _cmp = _wk_df[_wk_df["_done"] & _wk_df["LY Revenue"].notna()]
+        _all_done = bool(_wk_df["_done"].all())
+        _prefix = "" if _all_done else "Finished weeks: "
+        _rev_sub, _off_sub = "Net sales, discounted items", f"{len(monthly_df)} discount codes"
+        if not _cmp.empty and _cmp["LY Revenue"].sum() > 0:
+            _rev_sub = (f"{_prefix}{_cmp['Revenue'].sum() / _cmp['LY Revenue'].sum() - 1:+.0%} "
+                        f"vs same weeks last year")
+            _off_sub = f"{_prefix}{int(_cmp['Offers'].sum())} vs {int(_cmp['LY Offers'].sum())} last year"
+        elif not _ly_any:
+            _rev_sub = "No last-year data (starts May 2025)"
+        elif _cmp.empty:
+            _rev_sub = "No finished weeks to compare yet"
         render_kpi_row([
             {"label": "Attributed Revenue", "value": fmt_money(total_rev), "exact": exact_money(total_rev),
-             "sub": "Net sales, discounted items"},
+             "sub": _rev_sub},
             {"label": "Total Sales", "value": fmt_money(total_sales), "exact": exact_money(total_sales),
              "sub": "Full matched orders"},
             {"label": "Total Orders", "value": fmt_count(total_orders), "exact": exact_count(total_orders)},
-            {"label": "Discount Codes", "value": str(len(monthly_df) if not monthly_df.empty else 0)},
+            {"label": "Offers Sent", "value": fmt_count(len(all_month)), "sub": _off_sub},
         ])
 
         spacer("lg")
 
-        # ── Weekly Revenue Trend ─────────────────────────────────────────
-        section_title("Weekly Revenue Trend", "Total and average revenue by week within the month")
+        # ── Week by week vs the same week last year ──────────────────────
+        section_title(
+            "Week by Week vs Last Year",
+            "Monday–Sunday weeks · bars = attributed revenue · labels = offers sent",
+        )
+        _chart_rows = []
+        for _, _w in _wk_df.iterrows():
+            _chart_rows.append({"Week": _w["Week"], "Year": "This year", "Revenue": _w["Revenue"],
+                                "Offers": f"{_w['Offers']} offers", "Dates": _w["Week"]})
+            if pd.notna(_w["LY Revenue"]):
+                _chart_rows.append({"Week": _w["Week"], "Year": "Last year", "Revenue": _w["LY Revenue"],
+                                    "Offers": f"{int(_w['LY Offers'])} offers",
+                                    "Dates": _w["Same Week Last Year"]})
+        _cdf = pd.DataFrame(_chart_rows)
+        _week_order = _wk_df["Week"].tolist()
+        _base = alt.Chart(_cdf).encode(
+            x=alt.X("Week:N", sort=_week_order, title=None, axis=alt.Axis(labelAngle=0)),
+            xOffset=alt.XOffset("Year:N", sort=["Last year", "This year"]),
+        )
+        _bars = _base.mark_bar(cornerRadiusEnd=3).encode(
+            y=alt.Y("Revenue:Q", title="Attributed Revenue", axis=alt.Axis(format="$,.0f")),
+            color=alt.Color("Year:N", sort=["Last year", "This year"],
+                            scale=alt.Scale(domain=["Last year", "This year"], range=[CLR_TEXT_MUTED, CLR_MONTHLY]),
+                            legend=alt.Legend(title=None, orient="top")),
+            tooltip=[alt.Tooltip("Year:N"), alt.Tooltip("Dates:N", title="Week"),
+                     alt.Tooltip("Revenue:Q", format="$,.2f"), alt.Tooltip("Offers:N")],
+        )
+        _labels = _base.mark_text(dy=-7, fontSize=10, color=CLR_TEXT_SECONDARY).encode(
+            y=alt.Y("Revenue:Q"), text="Offers:N",
+        )
+        st.altair_chart(styled_chart((_bars + _labels).properties(height=320)), width="stretch")
 
-        if not all_month.empty:
-            all_month["_send_dt"] = pd.to_datetime(all_month["_send_dt"])
-            all_month["Week"] = all_month["_send_dt"].dt.isocalendar().week.astype(str)
-            _monday = all_month["_send_dt"] - pd.to_timedelta(all_month["_send_dt"].dt.weekday, unit="D")
-            all_month["Week_Start"] = _monday.dt.strftime("%m/%d")
-
-            weekly_agg = all_month.groupby("Week_Start").agg(
-                Attributed_Revenue=("Attributed Revenue", "sum"),
-                Total_Sales=("Total Sales", "sum"),
-                Campaign_Count=("Campaign Name", "count"),
-            ).reset_index().sort_values("Week_Start")
-
-            base = alt.Chart(weekly_agg).encode(
-                x=alt.X("Week_Start:N", title="Week Starting", sort=None),
-            )
-
-            bars = base.mark_bar(color=CLR_MONTHLY, opacity=0.7, cornerRadiusEnd=3).encode(
-                y=alt.Y("Total_Sales:Q", title="Total Sales"),
-                tooltip=[
-                    alt.Tooltip("Week_Start:N", title="Week of"),
-                    alt.Tooltip("Total_Sales:Q", format="$,.2f", title="Total Sales"),
-                    alt.Tooltip("Attributed_Revenue:Q", format="$,.2f", title="Attributed Revenue"),
-                    alt.Tooltip("Campaign_Count:Q", title="Campaigns"),
-                ],
-            )
-
-            line = base.mark_line(color=CLR_MONTHLY_LINE, strokeWidth=3, point=True).encode(
-                y=alt.Y("Attributed_Revenue:Q", title="Attributed Revenue"),
-                tooltip=[
-                    alt.Tooltip("Attributed_Revenue:Q", format="$,.2f", title="Attributed Revenue"),
-                ],
-            )
-
-            combo = alt.layer(bars, line).resolve_scale(y="independent").properties(height=350)
-            st.altair_chart(styled_chart(combo), width="stretch")
-            st.caption(
-                f"Bars = total sales (full orders) \u00b7 Line = attributed revenue (net sales, discounted items)"
-            )
-        else:
-            st.info("No weekly data to chart.")
+        st.dataframe(
+            _wk_df.drop(columns=["_mon", "_done"]),
+            column_config={
+                "Week": st.column_config.TextColumn("Week (Mon–Sun)", width="medium"),
+                "Revenue": st.column_config.NumberColumn("Revenue", format="$%.2f"),
+                "Same Week Last Year": st.column_config.TextColumn("Same Week Last Year", width="medium"),
+                "LY Offers": st.column_config.NumberColumn("LY Offers", format="%d"),
+                "LY Revenue": st.column_config.NumberColumn("LY Revenue", format="$%.2f"),
+                "Change": st.column_config.NumberColumn("Change", format="percent"),
+            },
+            width="stretch",
+            hide_index=True,
+        )
+        st.caption(
+            f"**How weeks work:** every week runs Monday to Sunday and belongs to the month that holds "
+            f"most of its days, so {_fmt_month((sel_year, sel_month))} is {week_label(_weeks[0])} to "
+            f"{week_label(_weeks[-1])} and no week is split between months. The month's totals above "
+            f"are these weeks added up. **Same week last year** is exactly 52 weeks earlier, so weekdays "
+            f"and holidays line up. Revenue = attributed revenue of finalized campaigns; offers = "
+            f"campaigns with a discount code. Last-year data starts May 2025."
+        )
 
         spacer("lg")
 
@@ -2023,35 +2341,32 @@ with tab_monthly:
             "Top 10 discount codes · each segment is one campaign (hover for its name)",
         )
 
-        if not all_month.empty:
-            contrib = all_month[["Discount Code", "Campaign Name", "Attributed Revenue"]].copy()
-            contrib = contrib.sort_values("Attributed Revenue", ascending=False)
+        contrib = all_month[["Discount Code", "Campaign Name", "Attributed Revenue"]].copy()
+        contrib = contrib.sort_values("Attributed Revenue", ascending=False)
 
-            _code_tot = contrib.groupby("Discount Code")["Attributed Revenue"].sum() \
-                .sort_values(ascending=False).rename("Attributed Revenue").reset_index()
-            _show_all_codes = show_all_toggle(len(_code_tot), "monthly_codes_show_all", noun="codes")
-            _code_top, _code_rest = split_top_n(_code_tot, "Attributed Revenue", show_all=_show_all_codes)
-            code_order = _code_top["Discount Code"].tolist()
-            contrib = contrib[contrib["Discount Code"].isin(code_order)]
+        _code_tot = contrib.groupby("Discount Code")["Attributed Revenue"].sum() \
+            .sort_values(ascending=False).rename("Attributed Revenue").reset_index()
+        _show_all_codes = show_all_toggle(len(_code_tot), "monthly_codes_show_all", noun="codes")
+        _code_top, _code_rest = split_top_n(_code_tot, "Attributed Revenue", show_all=_show_all_codes)
+        code_order = _code_top["Discount Code"].tolist()
+        contrib = contrib[contrib["Discount Code"].isin(code_order)]
 
-            # One color, white gaps between campaigns: no legend that grows
-            # with the number of campaigns.
-            stacked = alt.Chart(contrib).mark_bar(
-                color=CLR_MONTHLY, stroke="white", strokeWidth=1.5,
-            ).encode(
-                y=alt.Y("Discount Code:N", sort=code_order, title=None),
-                x=alt.X("Attributed Revenue:Q", title="Attributed Revenue", stack="zero"),
-                tooltip=[
-                    alt.Tooltip("Discount Code:N"),
-                    alt.Tooltip("Campaign Name:N"),
-                    alt.Tooltip("Attributed Revenue:Q", format="$,.2f"),
-                ],
-            ).properties(height=max(len(code_order) * 34, 150))
+        # One color, white gaps between campaigns: no legend that grows
+        # with the number of campaigns.
+        stacked = alt.Chart(contrib).mark_bar(
+            color=CLR_MONTHLY, stroke="white", strokeWidth=1.5,
+        ).encode(
+            y=alt.Y("Discount Code:N", sort=code_order, title=None),
+            x=alt.X("Attributed Revenue:Q", title="Attributed Revenue", stack="zero"),
+            tooltip=[
+                alt.Tooltip("Discount Code:N"),
+                alt.Tooltip("Campaign Name:N"),
+                alt.Tooltip("Attributed Revenue:Q", format="$,.2f"),
+            ],
+        ).properties(height=max(len(code_order) * 34, 150))
 
-            st.altair_chart(styled_chart(stacked), width="stretch")
-            rest_caption(_code_rest, "Attributed Revenue", _code_tot["Attributed Revenue"].sum(), "codes")
-        else:
-            st.info("No data for discount code breakdown.")
+        st.altair_chart(styled_chart(stacked), width="stretch")
+        rest_caption(_code_rest, "Attributed Revenue", _code_tot["Attributed Revenue"].sum(), "codes")
 
         spacer("lg")
 
@@ -2086,6 +2401,138 @@ with tab_monthly:
                 },
                 width="stretch",
                 hide_index=True,
+            )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tab: Offer A vs Offer B (2-1-1 cadence) — uses the sidebar date range
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with tab_ab:
+
+    if wk_start is None:
+        st.info("Pick a start and an end date under Date Range in the sidebar.")
+    else:
+        st.markdown(f'<div class="context-line">{_range_label}</div>', unsafe_allow_html=True)
+        _ab = completed_week_df.join(_slots, how="inner") if not _slots.empty else pd.DataFrame()
+        _a = _ab[_ab["Offer Slot"] == "A"] if not _ab.empty else _ab
+        _b = _ab[_ab["Offer Slot"] == "B"] if not _ab.empty else _ab
+        _single = _ab[_ab["Offer Slot"] == "Single"] if not _ab.empty else _ab
+
+        if _a.empty or _b.empty:
+            st.info(
+                "No two-offer days in this date range. Offer A vs B compares the main offer (A) and "
+                "the second offer (B) on days that sent two offers. Widen the date range in the sidebar."
+            )
+            st.caption(_offer_log_note)
+        else:
+            _sa, _sb, _ss = slot_summary(_a), slot_summary(_b), slot_summary(_single)
+            _two_days = _ab[_ab["Offer Slot"].isin(["A", "B"])]
+            _n_days = _two_days["Parsed Send Date"].nunique()
+            _n_log = _two_days[_two_days["Slot Source"] == "Offer Log"]["Parsed Send Date"].nunique()
+            _weeks_b = _b["Parsed Send Date"].apply(_week_monday).nunique()
+            _b_week = _sb["revenue"] / _weeks_b if _weeks_b else 0
+            _gap = (_sb["per_1000"] / _sa["per_1000"] - 1) if _sa["per_1000"] else None
+
+            render_kpi_row([
+                {"label": "A (Main) per 1,000 Delivered", "value": f"${_sa['per_1000'] or 0:,.0f}",
+                 "sub": f"{_sa['offers']} offers · avg {fmt_money(_sa['avg'])} each"},
+                {"label": "B (Second) per 1,000 Delivered", "value": f"${_sb['per_1000'] or 0:,.0f}",
+                 "sub": (f"{_gap:+.0%} vs A · {_sb['offers']} offers" if _gap is not None
+                         else f"{_sb['offers']} offers")},
+                {"label": "B Revenue per Week", "value": fmt_money(_b_week), "exact": exact_money(_b_week),
+                 "sub": f"suggested target {fmt_money(B_WEEKLY_TARGET)} · {_weeks_b} weeks"},
+                {"label": "B Offers With $0", "value": f"{_sb['zero_share']:.0%}",
+                 "sub": f"suggested target ≤ {B_ZERO_TARGET:.0%} · A: {_sa['zero_share']:.0%}"},
+            ])
+            st.caption(
+                f"{_n_days} two-offer days in this range: {_n_log} labelled A/B in the Offer Log, "
+                f"{_n_days - _n_log} estimated (the bigger send that day = A). {_offer_log_note} "
+                f"Targets are the ones suggested in the November 12 cadence review."
+            )
+
+            spacer("md")
+            section_title("Side by Side", "Main offer, second offer, and days with a single offer")
+
+            def _fmt_row(s):
+                return [
+                    f"{s['offers']:,}", fmt_money(s["revenue"]),
+                    fmt_money(s["avg"]) if s["avg"] is not None else "—",
+                    f"${s['per_1000']:,.0f}" if s["per_1000"] is not None else "—",
+                    f"{s['zero_share']:.0%}" if s["zero_share"] is not None else "—",
+                    f"{s['audience']:,.0f}" if s["audience"] is not None else "—",
+                ]
+
+            st.dataframe(
+                pd.DataFrame({
+                    "Measure": ["Offers sent", "Attributed revenue", "Average revenue per offer",
+                                "Revenue per 1,000 delivered", "Offers with $0", "Average audience (delivered)"],
+                    "Offer A (main)": _fmt_row(_sa),
+                    "Offer B (second)": _fmt_row(_sb),
+                    "Single-offer days": _fmt_row(_ss),
+                }),
+                width="stretch",
+                hide_index=True,
+            )
+
+            spacer("md")
+            section_title("Week by Week", "Revenue from main and second offers on two-offer days")
+            _wk = _two_days.copy()
+            _wk["Week"] = _wk["Parsed Send Date"].apply(_week_monday)
+            _wk_sum = _wk.groupby(["Week", "Offer Slot"])["Attributed Revenue"].sum().reset_index()
+            _wk_sum["Week Label"] = _wk_sum["Week"].apply(week_label)
+            _wk_sum["Offer"] = _wk_sum["Offer Slot"].map({"A": "A (main)", "B": "B (second)"})
+            _order = [week_label(w) for w in sorted(_wk_sum["Week"].unique())]
+            _bars = alt.Chart(_wk_sum).mark_bar(cornerRadiusEnd=2).encode(
+                x=alt.X("Week Label:N", sort=_order, title=None, axis=alt.Axis(labelAngle=-40)),
+                xOffset=alt.XOffset("Offer:N"),
+                y=alt.Y("Attributed Revenue:Q", title="Attributed Revenue", axis=alt.Axis(format="$,.0f")),
+                color=alt.Color("Offer:N", scale=alt.Scale(domain=["A (main)", "B (second)"],
+                                                           range=[CLR_WEEKLY, CLR_TEAL]),
+                                legend=alt.Legend(title=None, orient="top")),
+                tooltip=[alt.Tooltip("Week Label:N", title="Week"), alt.Tooltip("Offer:N"),
+                         alt.Tooltip("Attributed Revenue:Q", format="$,.2f")],
+            )
+            _rule = alt.Chart(pd.DataFrame({"y": [B_WEEKLY_TARGET]})).mark_rule(
+                strokeDash=[5, 4], color=CLR_TEAL,
+            ).encode(y="y:Q")
+            st.altair_chart(styled_chart((_bars + _rule).properties(height=320)), width="stretch")
+            st.caption(f"Dashed line = suggested B target of {fmt_money(B_WEEKLY_TARGET)} a week.")
+
+            spacer("md")
+            section_title("Day by Day", "Each two-offer day with its main and second offer")
+            _days = []
+            for _d, _g in _two_days.groupby("Parsed Send Date"):
+                _ga, _gb = _g[_g["Offer Slot"] == "A"], _g[_g["Offer Slot"] == "B"]
+                _days.append({
+                    "Date": _d,
+                    "Offer A": " | ".join(_ga["Producer / Topic"]),
+                    "A Revenue": _ga["Attributed Revenue"].sum(),
+                    "A Delivered": _ga["Delivered"].sum(),
+                    "Offer B": " | ".join(_gb["Producer / Topic"]),
+                    "B Revenue": _gb["Attributed Revenue"].sum(),
+                    "B Delivered": _gb["Delivered"].sum(),
+                    "A/B From": "Offer Log" if (_g["Slot Source"] == "Offer Log").all() else "Estimated",
+                })
+            st.dataframe(
+                pd.DataFrame(_days).sort_values("Date", ascending=False),
+                column_config={
+                    "Date": st.column_config.DateColumn("Date", width="small", pinned=True),
+                    "A Revenue": st.column_config.NumberColumn("A Revenue", format="$%.2f"),
+                    "B Revenue": st.column_config.NumberColumn("B Revenue", format="$%.2f"),
+                    "A Delivered": st.column_config.NumberColumn("A Delivered", format="%d"),
+                    "B Delivered": st.column_config.NumberColumn("B Delivered", format="%d"),
+                },
+                height=420,
+                width="stretch",
+                hide_index=True,
+            )
+            st.caption(
+                "**How to read this:** on two-offer days (Monday to Thursday under 2-1-1) the main offer "
+                "(A) goes to the bigger list and the second offer (B) to a smaller segment, so compare "
+                "**revenue per 1,000 delivered** rather than totals. Events (BIN Sale, Large Format, "
+                "Holiday) are left out. A/B comes from the Offer Log's Rank column (“A” = main); "
+                "days without a single “A” use the bigger send as A and are marked Estimated."
             )
 
 
@@ -2655,6 +3102,9 @@ slim-down; and incrementality would require a holdout test.
 - **New vs existing customers** splits Attributed Revenue. An order is from a **new customer** when it is the buyer's first-ever Shopify order (checked by Shopify customer and email address against every order since the store opened in March 2020, ignoring cancelled and test orders). Everything else is **existing**, so New + Existing = Attributed Revenue. People who bought only by phone, wholesale or on an older site count as new on their first Shopify order.
 - **Automatic-discount offers** (Campaigns tab) shows, for offers set up as automatic discounts, what the email is credited with next to what the same discount sold to people who were **not sent** the email. The not-sent part is context only and is never added to email revenue.
 - **Products** (Producers tab) lists the wines that carried each producer's campaign discount, valued the same way as Attributed Revenue, so they add up to it. **Featured in email** compares the wine's vintage with the vintage(s) in the campaign name.
+- **Monthly tab weeks** run Monday to Sunday. A week belongs to the month that holds most of its days (4 or 5 whole weeks a month, never split), and the month's totals are those weeks added up. **Same week last year** is exactly 52 weeks earlier, so weekdays and holidays line up. Comparisons with last year use finished weeks only.
+- **Offer A vs B**: on days with two offers, the main offer is **A** and the other **B**; days with one offer are **Single**. Which offer is A comes from the Offer Log's Rank column ("A"); days the log doesn't label use the bigger send as A and are marked **Estimated**. Compare **revenue per 1,000 delivered**, because B goes to smaller segments. The $5,000-a-week and 25%-at-$0 lines are suggested targets from the November 2026 cadence review.
+- **Key Insights** (Weekly tab) are four short findings for the selected dates: revenue vs the same dates last year and the previous period, the best offer and the offers that made $0, Offer A vs B, and new customers.
 - The sidebar **event-campaign filter** hides BIN Sale, Large Format and Holiday campaigns: any campaign whose code is a discount family (BIN Sale, GoBig, BigDaddy, July4th, LaborDay25…), whose name contains BIN Sale / holiday sale / flash sale / clearance, or whose code has Offer Type `holiday` or `format promotion` in the mapping sheet. Producer offers using the producer's own code are kept even if themed (e.g. a large-format Las Cases offer). This filter changes what is shown only — never how revenue is attributed.
 - The **Producers tab** only includes finalized campaigns, resolves each discount code to a producer via the mapping spreadsheet, and excludes non-producer buckets (BIN Sale, Holiday, etc.) from producer rankings.
 - History rows for finalized campaigns are **frozen** — later pipeline runs never overwrite them.
