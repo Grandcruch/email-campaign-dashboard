@@ -11,6 +11,9 @@ Usage:
 
 import sys
 import os
+import io
+import csv
+import html
 import json
 from datetime import date, datetime, timedelta
 
@@ -21,7 +24,7 @@ import altair as alt
 # Pipeline code version — bump on every deploy-relevant change. Displayed in
 # the sidebar so a stale-module deploy (Streamlit Cloud soft-reload keeping
 # old src/ modules) is immediately visible instead of masquerading as bad data.
-PIPELINE_VERSION = "2026-11-17.1"
+PIPELINE_VERSION = "2026-11-20.1"
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -133,13 +136,29 @@ GLOBAL_CSS = f"""
         color: {CLR_TEXT_PRIMARY} !important;
     }}
 
-    /* ── KPI Card ── */
+    /* ── KPI Cards: 4 per row (2 when the content area is narrow, e.g.
+          sidebar open on a laptop); every card the same size ── */
+    .kpi-wrap {{
+        container-type: inline-size;
+    }}
+    .kpi-grid {{
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.75rem;
+    }}
+    @container (max-width: 760px) {{
+        .kpi-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    }}
     .kpi-card {{
         background: {CLR_SURFACE};
         border: 1px solid {CLR_BORDER};
         border-radius: 8px;
-        padding: 1.25rem 1.5rem;
+        padding: 1rem 1.25rem;
         text-align: left;
+        height: 108px;
+        box-sizing: border-box;
+        overflow: hidden;
+        min-width: 0;
     }}
     .kpi-card .kpi-label {{
         font-size: 0.75rem;
@@ -148,18 +167,26 @@ GLOBAL_CSS = f"""
         text-transform: uppercase;
         letter-spacing: 0.05em;
         margin-bottom: 0.25rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }}
     .kpi-card .kpi-value {{
-        font-size: 1.5rem;
+        font-size: clamp(1.15rem, 1.8vw, 1.5rem);
         font-weight: 700;
         color: {CLR_TEXT_PRIMARY};
-        line-height: 1.2;
+        line-height: 1.25;
         white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }}
     .kpi-card .kpi-sub {{
-        font-size: 0.8rem;
+        font-size: 0.78rem;
         color: {CLR_TEXT_SECONDARY};
-        margin-top: 0.25rem;
+        margin-top: 0.3rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }}
 
     /* ── Insight Card — all bordered containers get the accent ── */
@@ -266,18 +293,201 @@ GLOBAL_CSS = f"""
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
+def _is_missing(v) -> bool:
+    try:
+        return v is None or bool(pd.isna(v))
+    except (TypeError, ValueError):
+        return False
+
+
+def fmt_money(v) -> str:
+    """Short dollars for KPI cards: $9,412 · $48.2K · $1.24M (no overflow at any range)."""
+    if _is_missing(v):
+        return "—"
+    v = float(v)
+    sign, a = ("-" if v < 0 else ""), abs(v)
+    if a >= 999_500:
+        return f"{sign}${a / 1_000_000:.2f}M"
+    if a >= 10_000:
+        return f"{sign}${a / 1_000:.1f}K"
+    return f"{sign}${a:,.0f}"
+
+
+def fmt_count(v) -> str:
+    """Short counts for KPI cards: 41,312 · 342.1K · 3.42M."""
+    if _is_missing(v):
+        return "—"
+    v = float(v)
+    if abs(v) >= 999_500:
+        return f"{v / 1_000_000:.2f}M"
+    if abs(v) >= 100_000:
+        return f"{v / 1_000:.1f}K"
+    return f"{v:,.0f}"
+
+
+def exact_money(v) -> str:
+    return "—" if _is_missing(v) else f"${float(v):,.2f}"
+
+
+def exact_count(v) -> str:
+    return "—" if _is_missing(v) else f"{float(v):,.0f}"
+
+
 def render_kpi_row(kpis: list[dict]):
-    """Render a row of styled KPI cards. Each dict: {label, value, sub (optional)}."""
-    cols = st.columns(len(kpis))
-    for col, kpi in zip(cols, kpis):
-        sub_html = f'<div class="kpi-sub">{kpi.get("sub", "")}</div>' if kpi.get("sub") else ""
-        col.markdown(f"""
-        <div class="kpi-card">
-            <div class="kpi-label">{kpi['label']}</div>
-            <div class="kpi-value">{kpi['value']}</div>
-            {sub_html}
-        </div>
-        """, unsafe_allow_html=True)
+    """Render KPI cards in a fixed 4-column grid (wraps to more rows).
+
+    Each dict: {label, value, sub (optional), exact (optional)}. Every card has
+    the same height whether or not it has a sub line, values are shortened by
+    the caller (fmt_money / fmt_count) so they never overflow, and `exact`
+    (the full figure) shows on hover.
+    """
+    cards = []
+    for kpi in kpis:
+        tip = kpi.get("exact") or ""
+        title_attr = f' title="{html.escape(str(tip), quote=True)}"' if tip else ""
+        sub = kpi.get("sub") or "&nbsp;"
+        cards.append(
+            f'<div class="kpi-card"{title_attr}>'
+            f'<div class="kpi-label">{kpi["label"]}</div>'
+            f'<div class="kpi-value">{kpi["value"]}</div>'
+            f'<div class="kpi-sub">{sub}</div>'
+            f'</div>'
+        )
+    st.markdown(f'<div class="kpi-wrap"><div class="kpi-grid">{"".join(cards)}</div></div>',
+                unsafe_allow_html=True)
+
+
+TOP_N = 10
+
+
+def split_top_n(df: pd.DataFrame, value_col: str, n: int = TOP_N,
+                show_all: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(top n rows by value_col, the rest). With show_all, everything is 'top'.
+    Bar charts draw only the top rows; the rest is summed in a caption rather
+    than drawn as one 'Other' bar, which would dwarf the bars that matter."""
+    d = df.sort_values(value_col, ascending=False).reset_index(drop=True)
+    if show_all or len(d) <= n:
+        return d, d.iloc[0:0]
+    return d.head(n), d.iloc[n:]
+
+
+def rest_caption(rest: pd.DataFrame, value_col: str, total: float, noun: str,
+                 unit: str = ""):
+    """'Plus 152 more producers with $1.65M combined (72% of the total).'
+    unit='' means dollars; otherwise a count with that unit ('clicks')."""
+    if rest.empty:
+        return
+    val = rest[value_col].sum()
+    share = f" ({val / total:.0%} of the total)" if total else ""
+    amount = f"{fmt_count(val)} {unit}" if unit else fmt_money(val)
+    st.caption(
+        f"Plus {len(rest)} more {noun} with {amount} combined{share}, "
+        f"not drawn. Turn on “Show all” to list them."
+    )
+
+
+def show_all_toggle(total: int, key: str, n: int = TOP_N, noun: str = "items") -> bool:
+    """'Show all N' switch, rendered only when there is more than n to show."""
+    if total <= n:
+        return False
+    return st.toggle(f"Show all {total} {noun}", value=False, key=key)
+
+
+# ─── Campaign Details CSV (other projects load this file — keep it stable) ───
+# Same columns, same order and same value format as the table download the
+# team used before 2026-11-20 (Streamlit's table download: original column
+# names, raw numbers, YYYY-MM-DD dates, UTF-8 with BOM). New columns are only
+# ever APPENDED at the end so position- and name-based loaders keep working.
+CAMPAIGN_CSV_COLUMNS = [
+    "Parsed Send Date", "Producer", "Discount Code", "Campaign Name",
+    "Discounted Orders", "Delivered", "Attributed Revenue",
+    "Total Sales", "Revenue per Delivered", "Sales per Delivered",
+    "Influenced Orders", "Influenced Offer Revenue", "Influenced Total Sales",
+    "Click-Influenced Orders", "Click-Influenced Offer Revenue",
+    "All-Buyer Orders", "All-Buyer Revenue",
+]
+# (source column, CSV header) — appended after the columns above, in order.
+CAMPAIGN_CSV_APPENDED = [
+    ("Clicked", "Clicks"),
+]
+
+
+def _csv_cell(v) -> str:
+    """Format one value the way the old table download did: blank for null,
+    whole numbers without '.0', other numbers in full precision, dates ISO."""
+    if _is_missing(v):
+        return ""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (pd.Timestamp, datetime)):
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v, date):
+        return v.isoformat()
+    if isinstance(v, (int, float)) or hasattr(v, "dtype"):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return str(v)
+        if f.is_integer():
+            return str(int(f))
+        import numpy as np
+        return np.format_float_positional(f, trim="-")
+    return str(v)
+
+
+def build_campaign_csv(details_df: pd.DataFrame) -> bytes:
+    """Campaign Details CSV: legacy columns first, appended columns after."""
+    cols = [c for c in CAMPAIGN_CSV_COLUMNS if c in details_df.columns]
+    appended = [(src, hdr) for src, hdr in CAMPAIGN_CSV_APPENDED if src in details_df.columns]
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(cols + [hdr for _, hdr in appended])
+    sources = cols + [src for src, _ in appended]
+    for row in details_df[sources].itertuples(index=False, name=None):
+        writer.writerow([_csv_cell(v) for v in row])
+    return ("﻿" + buf.getvalue()).encode("utf-8")
+
+
+# ─── Fixed benchmark (Revenue per 1,000 delivered) ──────────────────────────
+# Frozen reference year so "good or bad" doesn't move with the date picker.
+# Median offer, split by day type because Fri/Sat full-list sends and weekday
+# segment sends earn very different amounts per email. Reset once a year.
+BENCHMARK_START = date(2025, 6, 1)
+BENCHMARK_END = date(2026, 5, 31)
+BENCHMARK_LABEL = "Jun 2025–May 2026"
+
+
+def _day_type(d) -> str:
+    return "Fri/Sat" if pd.Timestamp(d).weekday() in (4, 5) else "Weekday"
+
+
+def offer_rates(df: pd.DataFrame, offer_type_map: dict) -> pd.DataFrame:
+    """Finalized, non-event offers with a discount code and at least the
+    minimum delivered, with their revenue per 1,000 delivered and day type."""
+    if df.empty:
+        return df.assign(rate_per_1000=pd.Series(dtype=float), day_type=pd.Series(dtype=str))
+    m = (
+        (df["Discount Code"] != "None")
+        & df["Attributed Revenue"].notna()
+        & (df["Delivered"] >= MIN_DELIVERED_THRESHOLD)
+        & (df["is_final_snapshot"] == True)
+        & df["Parsed Send Date"].notna()
+        & ~event_mask(df, offer_type_map)
+    )
+    o = df[m].copy()
+    o["rate_per_1000"] = o["Attributed Revenue"] / o["Delivered"] * 1000
+    o["day_type"] = o["Parsed Send Date"].apply(_day_type)
+    return o
+
+
+def compute_benchmarks(full: pd.DataFrame, offer_type_map: dict) -> dict:
+    """Median revenue per 1,000 delivered per day type over the frozen year."""
+    o = offer_rates(full, offer_type_map)
+    if o.empty:
+        return {}
+    d = pd.to_datetime(o["Parsed Send Date"]).dt.date
+    o = o[(d >= BENCHMARK_START) & (d <= BENCHMARK_END)]
+    return {k: float(g["rate_per_1000"].median()) for k, g in o.groupby("day_type") if len(g) >= 10}
 
 
 def section_title(title: str, subtitle: str = ""):
@@ -1019,6 +1229,26 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+    # ── Date Range (shared by the Weekly and Campaigns tabs) ────────────
+    st.markdown(f"""
+    <div style="margin-top: 1.25rem; font-size: 0.7rem; color: {CLR_TEXT_MUTED}; text-transform: uppercase; letter-spacing: 0.05em;">
+        Date Range &middot; Weekly &amp; Campaigns tabs
+    </div>
+    """, unsafe_allow_html=True)
+    _all_send_dates = pd.to_datetime(full_df["Parsed Send Date"].dropna()).dt.date
+    _min_date = _all_send_dates.min() if not _all_send_dates.empty else DATA_START_DATE
+    date_range = st.date_input(
+        "Send dates",
+        value=(run_date - timedelta(days=6), run_date),
+        min_value=_min_date,
+        max_value=run_date,
+        key="wk_date_range",
+    )
+    finalized_only = st.toggle(
+        "Finalized only", value=True, key="wk_finalized_toggle",
+        help="Only campaigns whose attribution window has closed, so their numbers won't change.",
+    )
+
     # ── Campaign Filter ─────────────────────────────────────────────────
     st.markdown(f"""
     <div style="margin-top: 1.25rem; font-size: 0.7rem; color: {CLR_TEXT_MUTED}; text-transform: uppercase; letter-spacing: 0.05em;">
@@ -1054,6 +1284,8 @@ with st.sidebar:
             Attributed Revenue &divide; Delivered. Measures net revenue earned per email delivered.<br><br>
             <strong style="color:{CLR_TEXT_PRIMARY};">Delivered</strong><br>
             Number of emails successfully delivered (from HubSpot).<br><br>
+            <strong style="color:{CLR_TEXT_PRIMARY};">Clicks</strong><br>
+            People who clicked at least one link in the email (HubSpot&rsquo;s &ldquo;Clicked&rdquo;). Click rate = Clicks &divide; Delivered.<br><br>
             <strong style="color:{CLR_TEXT_PRIMARY};">Discounted Orders</strong><br>
             Number of Shopify orders that used the campaign discount code within the attribution window.<br><br>
             <strong style="color:{CLR_TEXT_PRIMARY};">Discount Value</strong><br>
@@ -1079,10 +1311,42 @@ from src.reports import generate_monthly_report, generate_producer_report
 _monthly_df = generate_monthly_report(display_df, run_date.year, run_date.month)
 _producer_current_df, _producer_final_df = generate_producer_report(display_df)
 
+# ─── Apply the sidebar date range (Weekly + Campaigns tabs) ──────────────────
+completed_week_df = pd.DataFrame()
+coded_week = pd.DataFrame()
+wk_start = wk_end = None
+_weekly_has_data = False
+_range_label = ""
+
+# date_input returns a tuple only when both dates are picked
+if isinstance(date_range, tuple) and len(date_range) == 2:
+    wk_start, wk_end = date_range[0], date_range[1]
+    _send = pd.to_datetime(display_df["Parsed Send Date"]).dt.date
+    completed_week_df = display_df[
+        display_df["Parsed Send Date"].notna() & (_send >= wk_start) & (_send <= wk_end)
+    ].copy()
+    if finalized_only:
+        completed_week_df = completed_week_df[
+            completed_week_df["is_final_snapshot"] == True
+        ].copy()
+    # Coded campaigns for charts and revenue KPIs
+    coded_week = completed_week_df[
+        (completed_week_df["Discount Code"] != "None") &
+        (completed_week_df["Attributed Revenue"].notna())
+    ].copy()
+    _weekly_has_data = not completed_week_df.empty
+    _fin_label = ("Finalized campaigns only" if finalized_only
+                  else "All campaigns (includes open windows)")
+    _range_label = (f'{_fin_label} &middot; {wk_start.strftime("%b %d")} '
+                    f'– {wk_end.strftime("%b %d, %Y")}')
+
+_benchmarks = compute_benchmarks(full_df, _offer_type_map)
+
 # ─── Tabs ────────────────────────────────────────────────────────────────────
 
-tab_weekly, tab_monthly, tab_producer, tab_section, tab_qa, tab_method = st.tabs([
+tab_weekly, tab_campaigns, tab_monthly, tab_producer, tab_section, tab_qa, tab_method = st.tabs([
     "Weekly",
+    "Campaigns",
     "Monthly",
     "Producers",
     "Offer Section",
@@ -1118,96 +1382,74 @@ def load_section_impact() -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Tab 1: Weekly Report — Completed Campaigns Only
+# Tab 1: Weekly — summary cards, top-10 ranking, detailed notes
+# (date range + Finalized toggle live in the sidebar, shared with Campaigns)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab_weekly:
 
-    # ── Date Range Selector ──────────────────────────────────────────────
-    col_toggle, col_dates = st.columns([1, 3])
-
-    with col_toggle:
-        finalized_only = st.toggle("Finalized only", value=True, key="wk_finalized_toggle")
-
-    # Determine date bounds from available data
-    _all_send_dates = pd.to_datetime(display_df["Parsed Send Date"].dropna()).dt.date
-    _min_date = _all_send_dates.min() if not _all_send_dates.empty else DATA_START_DATE
-    _max_date = _all_send_dates.max() if not _all_send_dates.empty else run_date
-
-    # Default: most recent full week (Mon-Sun)
-    _default_end = run_date
-    _default_start = _default_end - timedelta(days=6)
-
-    with col_dates:
-        date_range = st.date_input(
-            "Date range",
-            value=(_default_start, _default_end),
-            min_value=_min_date,
-            max_value=run_date,
-            key="wk_date_range",
-        )
-
-    # Initialize to empty so references below are always safe
-    completed_week_df = pd.DataFrame()
-    coded_week = pd.DataFrame()
-    wk_start = wk_end = None
-    _weekly_has_data = False
-
-    # date_input returns a tuple only when both dates are picked
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        wk_start, wk_end = date_range[0], date_range[1]
-
-        # Filter DataFrame to selected date range
-        mask = (
-            display_df["Parsed Send Date"].notna() &
-            (pd.to_datetime(display_df["Parsed Send Date"]).dt.date >= wk_start) &
-            (pd.to_datetime(display_df["Parsed Send Date"]).dt.date <= wk_end)
-        )
-        completed_week_df = display_df[mask].copy()
-
-        if finalized_only:
-            completed_week_df = completed_week_df[
-                completed_week_df["is_final_snapshot"] == True
-            ].copy()
-
-        # Context label
-        fin_label = "Finalized campaigns only" if finalized_only else "All campaigns (includes open windows)"
-        st.markdown(
-            f'<div class="context-line">{fin_label} &middot; '
-            f'{wk_start.strftime("%b %d")} \u2013 {wk_end.strftime("%b %d, %Y")}</div>',
-            unsafe_allow_html=True,
-        )
-
-        # Coded campaigns for charts
-        coded_week = completed_week_df[
-            (completed_week_df["Discount Code"] != "None") &
-            (completed_week_df["Attributed Revenue"].notna())
-        ].copy()
-
-        _weekly_has_data = not completed_week_df.empty
-
-    if not _weekly_has_data:
-        if wk_start is not None:
-            st.info("No campaigns in the selected date range match the current filter.")
+    if wk_start is None:
+        st.info("Pick a start and an end date under Date Range in the sidebar.")
+    elif not _weekly_has_data:
+        st.markdown(f'<div class="context-line">{_range_label}</div>', unsafe_allow_html=True)
+        st.info("No campaigns in the selected date range match the current filter.")
     else:
-        # ── KPI Row ──────────────────────────────────────────────────────
-        kpis = [
-            {"label": "Campaigns", "value": str(len(completed_week_df))},
-            {"label": "Total Delivered", "value": f"{completed_week_df['Delivered'].sum():,}"},
-        ]
+        st.markdown(f'<div class="context-line">{_range_label}</div>', unsafe_allow_html=True)
+
+        # ── KPI cards (4 per row, same size, short numbers; hover = exact) ──
+        _deliv = completed_week_df["Delivered"].sum()
+        _clicks = completed_week_df["Clicked"].sum() if "Clicked" in completed_week_df.columns else None
+        _delivered_card = {
+            "label": "Delivered", "value": fmt_count(_deliv), "exact": exact_count(_deliv),
+            "sub": f"{len(completed_week_df):,} campaigns",
+        }
+        _clicks_card = {
+            "label": "Clicks", "value": fmt_count(_clicks), "exact": exact_count(_clicks),
+            "sub": (f"{_clicks / _deliv:.1%} of delivered" if _clicks is not None and _deliv else ""),
+        }
+        kpis = []
         if not coded_week.empty:
-            kpis.append({"label": "Attributed Revenue", "value": f"${coded_week['Attributed Revenue'].sum():,.2f}",
-                         "sub": "Net sales, discounted items"})
-            kpis.append({"label": "Total Sales", "value": f"${coded_week['Total Sales'].sum():,.2f}",
-                         "sub": "Full matched orders"})
-            kpis.append({"label": "Orders", "value": f"{coded_week['Discounted Orders'].dropna().sum():.0f}"})
+            _attr = coded_week["Attributed Revenue"].sum()
+            _sales = coded_week["Total Sales"].sum()
+            _orders = coded_week["Discounted Orders"].dropna().sum()
+            kpis += [
+                {"label": "Attributed Revenue", "value": fmt_money(_attr), "exact": exact_money(_attr),
+                 "sub": "Net sales, discounted items"},
+                {"label": "Total Sales", "value": fmt_money(_sales), "exact": exact_money(_sales),
+                 "sub": "Full matched orders"},
+                {"label": "Orders", "value": fmt_count(_orders), "exact": exact_count(_orders),
+                 "sub": "Used the campaign discount"},
+            ]
+            # Fixed benchmark: each finalized offer vs the typical offer of
+            # the reference year sent on the same kind of day.
+            if _benchmarks:
+                _rates = offer_rates(completed_week_df, _offer_type_map)
+                _rates = _rates[_rates["day_type"].isin(list(_benchmarks))]
+                _bench_txt = " · ".join(
+                    f"{k} ${v:,.0f}" for k, v in sorted(_benchmarks.items(), key=lambda kv: kv[0] != "Weekday")
+                )
+                _bench_tip = (
+                    f"Benchmark = revenue per 1,000 emails delivered of the typical (median) offer, "
+                    f"{BENCHMARK_LABEL}: {_bench_txt}. Each finalized offer in this range is compared "
+                    f"with the benchmark for its day type (Fri/Sat or weekday). Events and sends under "
+                    f"{MIN_DELIVERED_THRESHOLD} delivered are left out."
+                )
+                if _rates.empty:
+                    kpis.append({"label": "Offers beating benchmark", "value": "—",
+                                 "sub": "No finalized offers in range", "exact": _bench_tip})
+                else:
+                    _above = int((_rates["rate_per_1000"] > _rates["day_type"].map(_benchmarks)).sum())
+                    kpis.append({"label": "Offers beating benchmark",
+                                 "value": f"{_above} of {len(_rates)}",
+                                 "sub": "Typical period: about half", "exact": _bench_tip})
+            kpis += [_delivered_card, _clicks_card]
             if "Influenced Total Sales" in coded_week.columns:
                 _inf_sales = coded_week["Influenced Total Sales"].dropna().sum()
                 _inf_orders = coded_week["Influenced Orders"].dropna().sum()
                 if _inf_orders > 0:
                     kpis.append({
-                        "label": "Influenced Sales",
-                        "value": f"${_inf_sales:,.2f}",
+                        "label": "Influenced Sales", "value": fmt_money(_inf_sales),
+                        "exact": exact_money(_inf_sales),
                         "sub": f"{_inf_orders:.0f} email-driven orders w/o code",
                     })
             if "Click-Influenced Offer Revenue" in coded_week.columns:
@@ -1215,135 +1457,101 @@ with tab_weekly:
                 _clk_orders = coded_week["Click-Influenced Orders"].dropna().sum()
                 if _clk_orders > 0:
                     kpis.append({
-                        "label": "Click-Influenced",
-                        "value": f"${_clk_rev:,.2f}",
-                        "sub": f"{_clk_orders:.0f} clicked, returned later, bought offer w/o code",
+                        "label": "Click-Influenced", "value": fmt_money(_clk_rev),
+                        "exact": exact_money(_clk_rev),
+                        "sub": f"{_clk_orders:.0f} clicked, returned later, bought w/o code",
                     })
+        else:
+            kpis += [_delivered_card, _clicks_card]
         render_kpi_row(kpis)
 
         spacer("lg")
 
-        # ── Campaign Performance Ranking ─────────────────────────────────
-        section_title("Campaign Performance Ranking", "Ranked by selected metric")
+        # ── Campaign Performance Ranking (top 10 by default) ─────────────
+        section_title(
+            "Campaign Performance Ranking",
+            "Top 10 by the selected metric · every campaign is listed in the Campaigns tab",
+        )
 
         if not coded_week.empty:
-            metric_choice = st.radio(
-                "Rank by",
-                ["Attributed Revenue", "Total Sales", "Revenue per Delivered"],
-                horizontal=True,
-                key="weekly_bar_metric",
-                label_visibility="collapsed",
-            )
+            _c_metric, _c_view = st.columns([3, 2])
+            with _c_metric:
+                metric_choice = st.radio(
+                    "Rank by",
+                    ["Attributed Revenue", "Total Sales", "Revenue per Delivered"],
+                    horizontal=True,
+                    key="weekly_bar_metric",
+                    label_visibility="collapsed",
+                )
+            with _c_view:
+                rank_view = st.radio(
+                    "Show",
+                    ["Top 10", "Bottom 10", "All"],
+                    horizontal=True,
+                    key="weekly_bar_view",
+                    label_visibility="collapsed",
+                )
 
-            chart_data = coded_week[["Campaign Name", "Discount Code", metric_choice]].copy()
-            chart_data = chart_data.sort_values(metric_choice, ascending=True)
+            _rank_src = coded_week
+            if metric_choice == "Revenue per Delivered":
+                # Efficiency rankings skip tiny sends (business rule)
+                _rank_src = coded_week[coded_week["Delivered"] >= MIN_DELIVERED_THRESHOLD]
+            chart_data = _rank_src[["Campaign Name", "Discount Code", "Delivered", metric_choice]] \
+                .dropna(subset=[metric_choice]).copy()
+            if rank_view == "Top 10":
+                chart_data = chart_data.nlargest(TOP_N, metric_choice)
+            elif rank_view == "Bottom 10":
+                chart_data = chart_data.nsmallest(TOP_N, metric_choice)
 
             fmt = "$,.4f" if metric_choice == "Revenue per Delivered" else "$,.2f"
-
             bar_chart = alt.Chart(chart_data).mark_bar(
                 color=CLR_WEEKLY,
                 cornerRadiusEnd=3,
             ).encode(
-                y=alt.Y("Campaign Name:N", sort=None, title=None),
-                x=alt.X(f"{metric_choice}:Q", title=metric_choice),
+                y=alt.Y("Campaign Name:N", sort=("x" if rank_view == "Bottom 10" else "-x"),
+                        title=None, axis=alt.Axis(labelLimit=380)),
+                x=alt.X(f"{metric_choice}:Q", title=metric_choice,
+                        axis=alt.Axis(format=("$,.2f" if metric_choice == "Revenue per Delivered" else "$,.0f"))),
                 tooltip=[
                     alt.Tooltip("Campaign Name:N"),
                     alt.Tooltip("Discount Code:N"),
+                    alt.Tooltip("Delivered:Q", format=","),
                     alt.Tooltip(f"{metric_choice}:Q", format=fmt),
                 ],
-            ).properties(height=max(len(chart_data) * 40, 200))
+            ).properties(height=max(len(chart_data) * 30, 160))
 
             st.altair_chart(styled_chart(bar_chart), use_container_width=True)
+            _notes = []
+            if metric_choice == "Revenue per Delivered":
+                _notes.append(f"Campaigns with fewer than {MIN_DELIVERED_THRESHOLD} delivered are left out.")
+            if rank_view == "All" and len(chart_data) > 50:
+                _notes.append("Long list: the Campaigns tab shows the same campaigns as a scrollable table.")
+            if _notes:
+                st.caption(" ".join(_notes))
         else:
             st.info("No coded campaigns with revenue data to chart.")
 
         spacer("lg")
 
-        # ── Delivery vs Revenue ──────────────────────────────────────────
-        section_title("Delivery vs Revenue", "Each dot represents one campaign")
+        # ── Detailed notes (collapsed; a short leadership summary replaces
+        #    this in a later update) ─────────────────────────────────────
+        with st.expander("Detailed campaign notes", expanded=False):
+            st.markdown(_generate_analytical_insights(completed_week_df, wk_start, wk_end))
 
-        if not coded_week.empty and len(coded_week) >= 2:
-            scatter_metric = st.radio(
-                "Scatter Y-axis",
-                ["Attributed Revenue", "Total Sales"],
-                horizontal=True,
-                key="weekly_scatter_metric",
-                label_visibility="collapsed",
-            )
 
-            scatter_data = coded_week[[
-                "Campaign Name", "Producer / Topic", "Delivered",
-                "Attributed Revenue", "Total Sales", "Revenue per Delivered"
-            ]].copy()
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tab 2: Campaigns — the campaign table + the CSV other projects load
+# ═══════════════════════════════════════════════════════════════════════════════
 
-            med_del = scatter_data["Delivered"].median()
-            med_rev = scatter_data[scatter_metric].median()
+with tab_campaigns:
 
-            scatter = alt.Chart(scatter_data).mark_circle(size=120, opacity=0.8).encode(
-                x=alt.X("Delivered:Q", title="Delivered"),
-                y=alt.Y(f"{scatter_metric}:Q", title=scatter_metric),
-                color=alt.Color(
-                    "Producer / Topic:N",
-                    scale=alt.Scale(range=PALETTE_MULTI),
-                    legend=alt.Legend(title="Producer"),
-                ),
-                tooltip=[
-                    alt.Tooltip("Campaign Name:N"),
-                    alt.Tooltip("Producer / Topic:N"),
-                    alt.Tooltip("Delivered:Q", format=","),
-                    alt.Tooltip("Attributed Revenue:Q", format="$,.2f"),
-                    alt.Tooltip("Total Sales:Q", format="$,.2f"),
-                    alt.Tooltip("Revenue per Delivered:Q", format="$,.4f"),
-                ],
-            )
-
-            # Quadrant reference lines
-            hline = alt.Chart(pd.DataFrame({"y": [med_rev]})).mark_rule(
-                strokeDash=[4, 4], color=CLR_BORDER, opacity=0.7
-            ).encode(y="y:Q")
-
-            vline = alt.Chart(pd.DataFrame({"x": [med_del]})).mark_rule(
-                strokeDash=[4, 4], color=CLR_BORDER, opacity=0.7
-            ).encode(x="x:Q")
-
-            # Quadrant text annotations
-            max_del = scatter_data["Delivered"].max()
-            min_del = scatter_data["Delivered"].min()
-            max_rev = scatter_data[scatter_metric].max()
-            min_rev = scatter_data[scatter_metric].min()
-            range_del = max_del - min_del if max_del != min_del else 1
-            range_rev = max_rev - min_rev if max_rev != min_rev else 1
-
-            quad_labels = pd.DataFrame([
-                {"x": max_del - range_del * 0.02, "y": max_rev - range_rev * 0.02, "text": "High reach, High revenue"},
-                {"x": min_del + range_del * 0.02, "y": max_rev - range_rev * 0.02, "text": "Low reach, High revenue"},
-                {"x": max_del - range_del * 0.02, "y": min_rev + range_rev * 0.02, "text": "High reach, Low revenue"},
-                {"x": min_del + range_del * 0.02, "y": min_rev + range_rev * 0.02, "text": "Low reach, Low revenue"},
-            ])
-            quad_text = alt.Chart(quad_labels).mark_text(
-                fontSize=10, color=CLR_TEXT_MUTED, fontWeight="normal",
-            ).encode(
-                x=alt.X("x:Q"),
-                y=alt.Y("y:Q"),
-                text="text:N",
-            )
-
-            scatter_combined = (scatter + hline + vline + quad_text).properties(height=400)
-            st.altair_chart(styled_chart(scatter_combined), use_container_width=True)
-        elif not coded_week.empty:
-            st.info("Need at least 2 campaigns for the scatter plot.")
-
-        spacer("lg")
-
-        # ── Weekly Insights ──────────────────────────────────────────────
-        section_title("Weekly Performance Insights", "Analysis based on completed-week campaigns only")
-        insights_md = _generate_analytical_insights(completed_week_df, wk_start, wk_end)
-        render_insight_card(insights_md)
-
-        spacer("lg")
-
-        # ── Supporting Detail Table ──────────────────────────────────────
-        section_title("Campaign Details")
+    if wk_start is None:
+        st.info("Pick a start and an end date under Date Range in the sidebar.")
+    elif not _weekly_has_data:
+        st.markdown(f'<div class="context-line">{_range_label}</div>', unsafe_allow_html=True)
+        st.info("No campaigns in the selected date range match the current filter.")
+    else:
+        st.markdown(f'<div class="context-line">{_range_label}</div>', unsafe_allow_html=True)
 
         # Derive Sales per Delivered = Total Sales / Delivered.
         # NaN-safe: null Total Sales (EDU/CONTENT) propagates; 0-Delivered
@@ -1361,52 +1569,56 @@ with tab_weekly:
             lambda c: resolve_producer(c, _wk_producer_map) or ""
         )
 
-        display_cols = [
-            "Parsed Send Date", "Producer", "Discount Code", "Campaign Name",
-            "Discounted Orders", "Delivered", "Attributed Revenue",
+        _c_info, _c_dl = st.columns([3, 1])
+        with _c_info:
+            section_title(
+                "Campaign Results",
+                f"{len(details_df):,} campaigns · newest first · click a column header to sort",
+            )
+        with _c_dl:
+            st.download_button(
+                "Download CSV (all columns)",
+                data=build_campaign_csv(details_df),
+                file_name=f"campaign_details_{wk_start.isoformat()}_to_{wk_end.isoformat()}.csv",
+                mime="text/csv",
+                key="campaign_csv_download",
+                use_container_width=True,
+            )
+
+        table_cols = [
+            "Parsed Send Date", "Producer", "Campaign Name", "Discount Code",
+            "Delivered", "Clicked", "Discounted Orders", "Attributed Revenue",
             "Total Sales", "Revenue per Delivered", "Sales per Delivered",
-            "Influenced Orders", "Influenced Offer Revenue", "Influenced Total Sales",
-            "Click-Influenced Orders", "Click-Influenced Offer Revenue",
-            "All-Buyer Orders", "All-Buyer Revenue",
         ]
-        available = [c for c in display_cols if c in details_df.columns]
+        available = [c for c in table_cols if c in details_df.columns]
         st.dataframe(
             details_df[available],
             column_config={
                 "Parsed Send Date": st.column_config.DateColumn("Send Date", width="small"),
                 "Producer": st.column_config.TextColumn("Producer", width="medium"),
                 "Campaign Name": st.column_config.TextColumn("Campaign", width="large"),
-                "Discount Code": st.column_config.TextColumn("Code", width="medium"),
+                "Discount Code": st.column_config.TextColumn("Code", width="small"),
+                "Delivered": st.column_config.NumberColumn("Delivered", format="%d"),
+                "Clicked": st.column_config.NumberColumn(
+                    "Clicks", format="%d",
+                    help="People who clicked at least one link in the email (HubSpot's 'Clicked')"),
+                "Discounted Orders": st.column_config.NumberColumn(
+                    "Orders", help="Orders that used the campaign discount"),
                 "Attributed Revenue": st.column_config.NumberColumn("Attr. Revenue", format="$%.2f"),
                 "Total Sales": st.column_config.NumberColumn("Total Sales", format="$%.2f"),
                 "Revenue per Delivered": st.column_config.NumberColumn("Rev/Delivered", format="$%.4f"),
                 "Sales per Delivered": st.column_config.NumberColumn("Sales/Delivered", format="$%.4f"),
-                "Influenced Orders": st.column_config.NumberColumn(
-                    "Infl. Orders", help="Email-driven orders that did not use the campaign code (UTM-matched)"),
-                "Influenced Offer Revenue": st.column_config.NumberColumn(
-                    "Infl. Offer Rev", format="$%.2f",
-                    help="Revenue from the offered wine's line items on influenced orders"),
-                "Influenced Total Sales": st.column_config.NumberColumn(
-                    "Infl. Total Sales", format="$%.2f",
-                    help="Full order value of influenced orders"),
-                "Click-Influenced Orders": st.column_config.NumberColumn(
-                    "Click-Infl. Orders",
-                    help="Buyer clicked this email, then bought the offered wine without a campaign code "
-                         "and without a UTM match (e.g. came back via Google). Additive to Infl. Orders"),
-                "Click-Influenced Offer Revenue": st.column_config.NumberColumn(
-                    "Click-Infl. Offer Rev", format="$%.2f",
-                    help="Offered-wine line revenue on click-influenced orders. Additive to Infl. Offer Rev"),
-                "All-Buyer Orders": st.column_config.NumberColumn(
-                    "All-Buyer Orders",
-                    help="Every order that used the discount, including automatic-discount buyers who were "
-                         "not sent this email. Same as Discounted Orders for typed codes"),
-                "All-Buyer Revenue": st.column_config.NumberColumn(
-                    "All-Buyer Revenue", format="$%.2f",
-                    help="Attributed Revenue before excluding automatic-discount buyers who were not sent "
-                         "this email. Context only, not credited to the email"),
             },
+            height=460,
             use_container_width=True,
             hide_index=True,
+        )
+        st.caption(
+            "**Download CSV (all columns)** is the file for other projects: the same columns in "
+            "the same order as before (including Influenced, Click-Influenced and All-Buyer), "
+            "with Clicks added at the end. The small download icon on the table saves only the "
+            "columns shown here. Blank = attribution not attempted (no code, EDU/CONTENT); "
+            "0 = attempted, no orders."
         )
 
 
@@ -1472,8 +1684,8 @@ with tab_monthly:
     # layout does not disappear when comparing across months.
     if _month_is_empty:
         render_kpi_row([
-            {"label": "Attributed Revenue", "value": "$0.00", "sub": "Net sales, discounted items"},
-            {"label": "Total Sales", "value": "$0.00", "sub": "Full matched orders"},
+            {"label": "Attributed Revenue", "value": "$0", "sub": "Net sales, discounted items"},
+            {"label": "Total Sales", "value": "$0", "sub": "Full matched orders"},
             {"label": "Total Orders", "value": "0"},
             {"label": "Discount Codes", "value": "0"},
         ])
@@ -1489,9 +1701,11 @@ with tab_monthly:
         total_sales = monthly_df["Total_Sales"].sum() if (not monthly_df.empty and "Total_Sales" in monthly_df.columns) else 0
         total_orders = monthly_df["Total_Discounted_Orders"].sum() if not monthly_df.empty else 0
         render_kpi_row([
-            {"label": "Attributed Revenue", "value": f"${total_rev:,.2f}", "sub": "Net sales, discounted items"},
-            {"label": "Total Sales", "value": f"${total_sales:,.2f}", "sub": "Full matched orders"},
-            {"label": "Total Orders", "value": f"{total_orders:.0f}"},
+            {"label": "Attributed Revenue", "value": fmt_money(total_rev), "exact": exact_money(total_rev),
+             "sub": "Net sales, discounted items"},
+            {"label": "Total Sales", "value": fmt_money(total_sales), "exact": exact_money(total_sales),
+             "sub": "Full matched orders"},
+            {"label": "Total Orders", "value": fmt_count(total_orders), "exact": exact_count(total_orders)},
             {"label": "Discount Codes", "value": str(len(monthly_df) if not monthly_df.empty else 0)},
         ])
 
@@ -1568,30 +1782,38 @@ with tab_monthly:
         spacer("lg")
 
         # ── Revenue by Campaign Breakdown ────────────────────────────────
-        section_title("Revenue by Campaign", "How each discount code's revenue splits across campaigns")
+        section_title(
+            "Revenue by Campaign",
+            "Top 10 discount codes · each segment is one campaign (hover for its name)",
+        )
 
         if not all_month.empty:
             contrib = all_month[["Discount Code", "Campaign Name", "Attributed Revenue"]].copy()
             contrib = contrib.sort_values("Attributed Revenue", ascending=False)
 
-            code_order = contrib.groupby("Discount Code")["Attributed Revenue"].sum().sort_values(ascending=False).index.tolist()
+            _code_tot = contrib.groupby("Discount Code")["Attributed Revenue"].sum() \
+                .sort_values(ascending=False).rename("Attributed Revenue").reset_index()
+            _show_all_codes = show_all_toggle(len(_code_tot), "monthly_codes_show_all", noun="codes")
+            _code_top, _code_rest = split_top_n(_code_tot, "Attributed Revenue", show_all=_show_all_codes)
+            code_order = _code_top["Discount Code"].tolist()
+            contrib = contrib[contrib["Discount Code"].isin(code_order)]
 
-            stacked = alt.Chart(contrib).mark_bar(cornerRadiusEnd=2).encode(
+            # One color, white gaps between campaigns: no legend that grows
+            # with the number of campaigns.
+            stacked = alt.Chart(contrib).mark_bar(
+                color=CLR_MONTHLY, stroke="white", strokeWidth=1.5,
+            ).encode(
                 y=alt.Y("Discount Code:N", sort=code_order, title=None),
                 x=alt.X("Attributed Revenue:Q", title="Attributed Revenue", stack="zero"),
-                color=alt.Color(
-                    "Campaign Name:N",
-                    scale=alt.Scale(range=PALETTE_MULTI),
-                    legend=alt.Legend(title="Campaign", orient="bottom", columns=2),
-                ),
                 tooltip=[
                     alt.Tooltip("Discount Code:N"),
                     alt.Tooltip("Campaign Name:N"),
                     alt.Tooltip("Attributed Revenue:Q", format="$,.2f"),
                 ],
-            ).properties(height=max(len(code_order) * 45, 150))
+            ).properties(height=max(len(code_order) * 34, 150))
 
             st.altair_chart(styled_chart(stacked), use_container_width=True)
+            rest_caption(_code_rest, "Attributed Revenue", _code_tot["Attributed Revenue"].sum(), "codes")
         else:
             st.info("No data for discount code breakdown.")
 
@@ -1659,36 +1881,43 @@ with tab_producer:
         _pa_n_producers = _pa_detail["Producer"].nunique() if not _pa_detail.empty else 0
         _pa_n_campaigns = _pa_detail["Campaign_Count"].sum() if not _pa_detail.empty else 0
         render_kpi_row([
-            {"label": "Attributed Revenue", "value": f"${_pa_total_rev:,.2f}", "sub": "Standalone & combo offers"},
-            {"label": "Producers", "value": str(int(_pa_n_producers))},
-            {"label": "Campaigns", "value": str(int(_pa_n_campaigns))},
-            {"label": "Discounted Orders", "value": f"{int(_pa_total_orders):,}"},
+            {"label": "Attributed Revenue", "value": fmt_money(_pa_total_rev), "exact": exact_money(_pa_total_rev),
+             "sub": "Standalone & combo offers"},
+            {"label": "Producers", "value": fmt_count(_pa_n_producers)},
+            {"label": "Campaigns", "value": fmt_count(_pa_n_campaigns), "exact": exact_count(_pa_n_campaigns)},
+            {"label": "Discounted Orders", "value": fmt_count(_pa_total_orders), "exact": exact_count(_pa_total_orders)},
         ])
 
         spacer("lg")
 
-        # ── E.1: Producer Revenue Pie Chart ──────────────────────────────
-        section_title("Producer Revenue", "Share of attributed revenue by producer (finalized, standalone & combo offers)")
+        # ── E.1: Top producers (ranked bars; replaces the all-producer pie) ──
+        section_title(
+            "Top Producers",
+            "Attributed revenue by producer, top 10 (finalized, standalone & combo offers)",
+        )
 
-        _pie_data = _pa_overview[_pa_overview["Total_Attributed_Revenue"] > 0][
-            ["Producer", "Total_Attributed_Revenue"]
+        _prod_data = _pa_overview[_pa_overview["Total_Attributed_Revenue"] > 0][
+            ["Producer", "Total_Attributed_Revenue", "Campaign_Count", "Total_Discounted_Orders"]
         ].copy()
-        _pie_data = _pie_data.sort_values("Total_Attributed_Revenue", ascending=False)
 
-        if not _pie_data.empty:
-            _pie_chart = alt.Chart(_pie_data).mark_arc(innerRadius=70, outerRadius=160).encode(
-                theta=alt.Theta("Total_Attributed_Revenue:Q", stack=True),
-                color=alt.Color(
-                    "Producer:N",
-                    scale=alt.Scale(scheme="reds"),
-                    legend=alt.Legend(orient="right", title="Producer"),
-                ),
+        if not _prod_data.empty:
+            _show_all_prod = show_all_toggle(len(_prod_data), "producer_bar_show_all", noun="producers")
+            _prod_total = _prod_data["Total_Attributed_Revenue"].sum()
+            _prod_data["Share"] = _prod_data["Total_Attributed_Revenue"] / _prod_total if _prod_total else 0.0
+            _prod_data, _prod_rest = split_top_n(_prod_data, "Total_Attributed_Revenue", show_all=_show_all_prod)
+            _prod_bar = alt.Chart(_prod_data).mark_bar(cornerRadiusEnd=3, color=CLR_PRODUCER).encode(
+                y=alt.Y("Producer:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260)),
+                x=alt.X("Total_Attributed_Revenue:Q", title="Attributed Revenue ($)"),
                 tooltip=[
-                    alt.Tooltip("Producer:N", title="Producer"),
+                    alt.Tooltip("Producer:N"),
                     alt.Tooltip("Total_Attributed_Revenue:Q", title="Attributed Revenue", format="$,.2f"),
+                    alt.Tooltip("Share:Q", title="Share of revenue", format=".1%"),
+                    alt.Tooltip("Campaign_Count:Q", title="Campaigns", format=",.0f"),
+                    alt.Tooltip("Total_Discounted_Orders:Q", title="Orders", format=",.0f"),
                 ],
-            ).properties(height=380)
-            st.altair_chart(styled_chart(_pie_chart), use_container_width=True)
+            ).properties(height=max(len(_prod_data) * 30, 160))
+            st.altair_chart(styled_chart(_prod_bar), use_container_width=True)
+            rest_caption(_prod_rest, "Total_Attributed_Revenue", _prod_total, "producers")
 
         spacer("lg")
 
@@ -1731,7 +1960,11 @@ with tab_producer:
         section_title("Region Performance", "Attributed revenue by top region and sub-region")
 
         if not _pa_region.empty:
-            _region_bar = alt.Chart(_pa_region).mark_bar(cornerRadiusEnd=3).encode(
+            _show_all_reg = show_all_toggle(len(_pa_region), "region_bar_show_all", noun="sub-regions")
+            _region_chart_df, _region_rest = split_top_n(
+                _pa_region, "Total_Attributed_Revenue", show_all=_show_all_reg,
+            )
+            _region_bar = alt.Chart(_region_chart_df).mark_bar(cornerRadiusEnd=3).encode(
                 y=alt.Y("Sub-Region:N", sort="-x", title="Sub-Region"),
                 x=alt.X("Total_Attributed_Revenue:Q", title="Attributed Revenue ($)"),
                 color=alt.Color("Top Region:N", scale=alt.Scale(scheme="reds")),
@@ -1742,8 +1975,10 @@ with tab_producer:
                     alt.Tooltip("Total_Discounted_Orders:Q", title="Orders", format=",.0f"),
                     alt.Tooltip("Producer_Count:Q", title="Producers", format=",.0f"),
                 ],
-            ).properties(height=max(len(_pa_region) * 38, 200))
+            ).properties(height=max(len(_region_chart_df) * 30, 160))
             st.altair_chart(styled_chart(_region_bar), use_container_width=True)
+            rest_caption(_region_rest, "Total_Attributed_Revenue",
+                         _pa_region["Total_Attributed_Revenue"].sum(), "sub-regions")
 
             st.dataframe(
                 _pa_region,
@@ -1881,7 +2116,9 @@ with tab_section:
              "sub": f"{_clicks['recipient'].nunique() if not _clicks.empty else 0} unique clickers"},
             {"label": "Section-Touched Orders", "value": str(len(_sec_touched)),
              "sub": "Buckets A + B"},
-            {"label": "Section-Touched Revenue", "value": f"${_sec_touched['total_price'].sum() if not _sec_touched.empty else 0:,.2f}",
+            {"label": "Section-Touched Revenue",
+             "value": fmt_money(_sec_touched['total_price'].sum() if not _sec_touched.empty else 0),
+             "exact": exact_money(_sec_touched['total_price'].sum() if not _sec_touched.empty else 0),
              "sub": "Evidence-based, not causal"},
             {"label": "Unattributable Share", "value": f"{(100 * _d_rev / _tot_rev) if _tot_rev else 0:.0f}%",
              "sub": "Bucket D revenue share"},
@@ -1905,14 +2142,17 @@ with tab_section:
         spacer("md")
         section_title("Section clicks by offer code", "Which offers the section is driving interest toward")
         if not _clicks.empty:
-            _by_code = _clicks.groupby("code").size().reset_index(name="Clicks") \
-                .sort_values("Clicks", ascending=True)
+            _by_code = _clicks.groupby("code").size().reset_index(name="Clicks")
+            _show_all_sc = show_all_toggle(len(_by_code), "section_clicks_show_all", noun="codes")
+            _sc_total = _by_code["Clicks"].sum()
+            _by_code, _sc_rest = split_top_n(_by_code, "Clicks", show_all=_show_all_sc)
             _chart = alt.Chart(_by_code).mark_bar(color=CLR_PRODUCER).encode(
                 y=alt.Y("code:N", sort="-x", title=None),
                 x=alt.X("Clicks:Q"),
                 tooltip=["code:N", "Clicks:Q"],
-            ).properties(height=max(len(_by_code) * 34, 160))
+            ).properties(height=max(len(_by_code) * 30, 160))
             st.altair_chart(styled_chart(_chart), use_container_width=True)
+            rest_caption(_sc_rest, "Clicks", _sc_total, "codes", unit="clicks")
         else:
             st.info("No section clicks recorded yet.")
 
@@ -2166,6 +2406,8 @@ slim-down; and incrementality would require a holdout test.
 | **> 0** | Normal attributed result. |
 
 - Campaigns with fewer than **50 deliveries** are excluded from efficiency rankings.
+- **Offers beating benchmark** (Weekly tab) compares each finalized offer's revenue per 1,000 emails delivered with a **fixed benchmark**: the typical (median) offer from **Jun 2025 – May 2026**, worked out separately for Fri/Sat sends and weekday sends because they earn very different amounts per email. Events and sends under 50 delivered are left out. Because the benchmark is the middle offer of that year, about half of offers beat it in a typical period. The benchmark does not change with the date picker; it is reset once a year.
+- **Clicks** is HubSpot's "Clicked": people who clicked at least one link. HubSpot's click rate is Clicks ÷ Delivered.
 - The sidebar **event-campaign filter** hides BIN Sale, Large Format and Holiday campaigns: any campaign whose code is a discount family (BIN Sale, GoBig, BigDaddy, July4th, LaborDay25…), whose name contains BIN Sale / holiday sale / flash sale / clearance, or whose code has Offer Type `holiday` or `format promotion` in the mapping sheet. Producer offers using the producer's own code are kept even if themed (e.g. a large-format Las Cases offer). This filter changes what is shown only — never how revenue is attributed.
 - The **Producers tab** only includes finalized campaigns, resolves each discount code to a producer via the mapping spreadsheet, and excludes non-producer buckets (BIN Sale, Holiday, etc.) from producer rankings.
 - History rows for finalized campaigns are **frozen** — later pipeline runs never overwrite them.

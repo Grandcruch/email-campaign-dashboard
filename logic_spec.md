@@ -18,6 +18,7 @@ These definitions are final and must not be changed without explicit business ap
 | **Discounted Orders** | Count of orders that used the campaign's discount code within the attribution window. | `COUNT(matched_orders)` | `null` if Code = None, EDU, or CONTENT |
 | **Delivered** | Number of emails successfully delivered. | `stats.counters.delivered` from the HubSpot v3 email list (`includeStats=true`), the email-level total across all sends | Never null for eligible campaigns |
 | **Revenue per Delivered** | Revenue efficiency per delivered email. | `Attributed Revenue / Delivered` | `null` if Attributed Revenue is `null` |
+| **Clicks** (added 2026-11-20) | People who clicked at least one link in the email (HubSpot's "Clicked"). Shown in the Campaigns tab, Weekly KPI cards and the Campaign Details CSV. | `stats.counters.click` from the same v3 email stats as Delivered (HubSpot's own click rate = `click / delivered`). Summed when A/B versions or event emails are merged into one row. | Never null for eligible campaigns (0 if nobody clicked) |
 
 ### 1.2 Retired Metrics
 
@@ -414,6 +415,26 @@ Orders with a TYPED code are never gated.
 **Codeless producers:** Included for delivery counts; revenue columns = N/A
 
 **Insights:** Top 5 by revenue, top 5 by efficiency, underperformers (high delivery / low revenue)
+
+### 6.4 Fixed Benchmark — "Offers beating benchmark" (added 2026-11-20)
+
+Replaces the Delivery vs Revenue scatter, whose median lines were recomputed from whatever date range was selected and so could not say whether results were good or bad.
+
+- **Rate per offer:** `Attributed Revenue / Delivered × 1,000` (revenue per 1,000 emails delivered).
+- **Which campaigns count as offers:** discount code present, Attributed Revenue not null, `Delivered ≥ 50` (`MIN_DELIVERED_THRESHOLD`), `is_final_snapshot = true`, and not an event (`event_mask`: BIN Sale, Large Format, Holiday, discount families). The sidebar event filter does not change this.
+- **Day type:** Fri/Sat (send date weekday 4 or 5) vs Weekday (all other days). They are benchmarked separately because full-list Fri/Sat sends and weekday segment sends earn very different amounts per email.
+- **Benchmark:** the median rate per day type over offers sent **2025-06-01 to 2026-05-31** (frozen reference year; a day type needs ≥ 10 offers). Constants `BENCHMARK_START` / `BENCHMARK_END` in `dashboard.py`. Reset once a year with user approval.
+- **KPI card:** "X of N" = finalized offers in the selected range whose rate is above the benchmark for their day type. By construction about half of offers beat it in a typical period.
+- Values when first shipped (2026-11-20): Weekday $1,159, Fri/Sat $1,040 per 1,000 delivered.
+
+### 6.5 Campaign Details CSV contract (added 2026-11-20)
+
+The Campaigns tab's **Download CSV (all columns)** file is loaded by other projects, so its format is fixed:
+
+- Columns, in this order (the original dataframe column names, as the old table download wrote them): `Parsed Send Date, Producer, Discount Code, Campaign Name, Discounted Orders, Delivered, Attributed Revenue, Total Sales, Revenue per Delivered, Sales per Delivered, Influenced Orders, Influenced Offer Revenue, Influenced Total Sales, Click-Influenced Orders, Click-Influenced Offer Revenue, All-Buyer Orders, All-Buyer Revenue`.
+- New columns are only ever **appended at the end**. Appended so far: `Clicks` (2026-11-20).
+- Values: dates `YYYY-MM-DD`; numbers unformatted (whole numbers without `.0`, others full precision, no exponent); null = empty cell, so the null-vs-zero rule (§1.3) is preserved; UTF-8 with BOM; comma delimiter; `\n` line ends.
+- Rows: every campaign in the sidebar date range after the Finalized and event filters, newest first.
 
 ---
 
